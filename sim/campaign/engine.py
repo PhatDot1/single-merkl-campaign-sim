@@ -27,7 +27,7 @@ from .agents import (
     WhaleProfile,
     resolve_cascades,
 )
-from .state import CampaignConfig, CampaignEnvironment, CampaignState
+from .state import CampaignConfig, CampaignEnvironment, CampaignState, compute_dynamic_base_apy
 
 # ============================================================================
 # SIMULATION ENGINE (inner loop — single path)
@@ -78,8 +78,18 @@ class CampaignSimulationEngine:
 
         env = self.env.copy()
 
+        # IRM feedback: if irm_params is provided, base_apy is recomputed each
+        # step from current TVL.  We use object.__setattr__ to bypass frozen=True
+        # since the engine is the sole owner of this config instance.
+        irm = self.config.irm_params  # None when static base_apy
+
         for step in range(self.config.num_steps):
             state.current_step = step
+
+            # Dynamic base APY update (IRM feedback loop)
+            if irm is not None:
+                new_base_apy = compute_dynamic_base_apy(state.tvl, irm)
+                object.__setattr__(self.config, "base_apy", new_base_apy)
 
             # 1. Record state
             state.record(self.config, env)
@@ -316,6 +326,7 @@ class LossResult:
     tvl_max: float = 0.0
     total_spend: float = 0.0
     budget_utilization: float = 0.0  # fraction of budget actually spent
+    budget_savings_usd: float = 0.0  # absolute USD not spent (total_budget - total_spend)
     max_cascade_depth: int = 0
     mercenary_fraction: float = 0.0  # peak mercenary TVL / peak total TVL
     sensitive_fraction: float = 0.0  # APY-sensitive TVL / total TVL at end
@@ -376,6 +387,7 @@ class CampaignLossEvaluator:
                 tvl_max=0,
                 total_spend=0,
                 budget_utilization=0,
+                budget_savings_usd=0,
                 max_cascade_depth=0,
                 mercenary_fraction=0,
                 sensitive_fraction=0,
@@ -534,6 +546,7 @@ class CampaignLossEvaluator:
             tvl_max=float(np.max(tvl)),
             total_spend=total_spent,
             budget_utilization=total_spent / total_budget if total_budget > 0 else 0,
+            budget_savings_usd=max(0.0, total_budget - total_spent),
             max_cascade_depth=state.max_cascade_depth,
             mercenary_fraction=(max(state.mercenary_tvl, 0) / max(np.max(tvl), 1)),
             sensitive_fraction=sensitive_frac,
@@ -572,6 +585,7 @@ class MonteCarloResult:
     tvl_max_p95: float = 0.0  # 95th percentile of path maximums
     mean_spend: float = 0.0
     mean_budget_util: float = 0.0
+    mean_budget_savings_usd: float = 0.0  # mean absolute USD saved (budget not spent)
     mean_cascade_depth: float = 0.0
     max_cascade_depth: int = 0
     mean_mercenary_fraction: float = 0.0
@@ -688,6 +702,7 @@ def run_monte_carlo(
         tvl_max_p95=float(np.percentile([r.tvl_max for r in results], 95)),
         mean_spend=float(np.mean([r.total_spend for r in results])),
         mean_budget_util=float(np.mean([r.budget_utilization for r in results])),
+        mean_budget_savings_usd=float(np.mean([r.budget_savings_usd for r in results])),
         mean_cascade_depth=mean_cascade,
         max_cascade_depth=int(np.max(cascade_depths)),
         mean_mercenary_fraction=float(np.mean([r.mercenary_fraction for r in results])),

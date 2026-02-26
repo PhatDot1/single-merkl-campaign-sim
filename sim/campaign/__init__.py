@@ -136,6 +136,8 @@ from .state import (
     CampaignConfig,
     CampaignEnvironment,
     CampaignState,
+    IRMParams,
+    compute_dynamic_base_apy,
 )
 
 __all__ = [
@@ -143,6 +145,8 @@ __all__ = [
     "CampaignConfig",
     "CampaignEnvironment",
     "CampaignState",
+    "IRMParams",
+    "compute_dynamic_base_apy",
     # Agents
     "CampaignAgent",
     "RetailDepositorAgent",

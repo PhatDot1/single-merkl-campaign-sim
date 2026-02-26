@@ -90,6 +90,21 @@ class RetailDepositorConfig:
     pools. DeFi-native pools may warrant 0.015-0.025.
     """
 
+    organic_tvl_floor_fraction: float = 0.0
+    """
+    Organic (incentive-independent) TVL floor as a fraction of initial TVL.
+    Derived from TVLStickinessModel.sticky_fraction.
+
+    e.g., 0.30 means 30% of the initial TVL is considered "sticky" — it
+    stays regardless of incentive APR because it is attracted by the venue's
+    organic yield, protocol integrations, or UX lock-in.
+
+    When > 0, this floor is enforced after each retail drift/diffusion step:
+    TVL is clamped to stay >= initial_tvl * organic_tvl_floor_fraction.
+    Default 0.0 (disabled) preserves the existing behaviour for all
+    existing tests and callers.
+    """
+
     @property
     def alpha_minus(self) -> float:
         return self.alpha_plus * self.alpha_minus_multiplier
@@ -115,6 +130,7 @@ class RetailDepositorAgent(CampaignAgent):
         super().__init__("retail_depositors", seed)
         self.config = config or RetailDepositorConfig()
         self._apr_buffer: list[float] = []  # ring buffer for lag
+        self._initial_tvl: float | None = None  # set on first act() call
 
     def act(
         self,
@@ -129,6 +145,10 @@ class RetailDepositorAgent(CampaignAgent):
         Only operates on the retail portion of TVL.
         """
         dt = config.dt_days
+
+        # Capture initial TVL on first call (for organic floor calculation)
+        if self._initial_tvl is None:
+            self._initial_tvl = max(state.tvl, 1.0)
 
         # Record current APR for future lagged reference
         current_apr = config.realized_apr(state.tvl)
@@ -162,9 +182,18 @@ class RetailDepositorAgent(CampaignAgent):
         # Apply change (respect supply cap if set)
         state.apply_tvl_change(drift + noise, supply_cap=config.supply_cap)
 
+        # Organic TVL floor: clamp TVL to at least sticky_fraction * initial_tvl
+        # This models depositors who remain regardless of incentive APR (protocol
+        # integrations, organic yield seekers, UX lock-in, etc.)
+        if self.config.organic_tvl_floor_fraction > 0.0 and self._initial_tvl is not None:
+            floor_usd = self.config.organic_tvl_floor_fraction * self._initial_tvl
+            if state.tvl < floor_usd:
+                state.tvl = floor_usd
+
     def reset(self) -> None:
         """Reset lag buffer for new simulation path."""
         self._apr_buffer.clear()
+        self._initial_tvl = None
 
 
 # ============================================================================

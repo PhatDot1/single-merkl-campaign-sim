@@ -18,8 +18,75 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
+
+# ============================================================================
+# INTEREST RATE MODEL (optional dynamic base APY feedback)
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class IRMParams:
+    """
+    Interest Rate Model parameters (Aave/Euler/Compound-style kink model).
+
+    As TVL (supply) grows, utilization = borrows / supply drops, so the
+    supply APY (base_apy) that the protocol offers to depositors also drops.
+    This creates a natural negative feedback: incentivising more TVL growth
+    makes the organic yield less attractive.
+
+    Borrow rate model (piecewise linear):
+        util <= optimal_util:  r_borrow = base_rate + util/optimal_util * slope1
+        util >  optimal_util:  r_borrow = base_rate + slope1 + excess * slope2
+            where excess = (util - optimal_util) / (1 - optimal_util)
+
+    Supply APY (what depositors earn):
+        r_supply = r_borrow * util * (1 - reserve_factor)
+    """
+
+    optimal_util: float = 0.80
+    """Utilization at the kink (e.g. 0.80 = 80%)."""
+
+    base_rate: float = 0.00
+    """Base borrow rate at 0% utilization (decimal)."""
+
+    slope1: float = 0.04
+    """Borrow rate slope below the kink (per unit utilization)."""
+
+    slope2: float = 0.60
+    """Borrow rate slope above the kink (steep, per unit excess util)."""
+
+    reserve_factor: float = 0.10
+    """Fraction of interest kept by the protocol (e.g. 0.10 = 10%)."""
+
+    initial_borrows_usd: float = 0.0
+    """Fixed borrow demand (USD). Assumed constant — depositors change, not borrowers."""
+
+
+def compute_dynamic_base_apy(tvl: float, irm: IRMParams) -> float:
+    """
+    Compute venue supply APY from IRM given current TVL (supply).
+
+    Args:
+        tvl: Current total value locked (supply side), USD.
+        irm: IRMParams for this venue.
+
+    Returns:
+        Supply APY (decimal, e.g. 0.032 = 3.2%). Returns 0.0 when TVL <= 0
+        or borrows == 0 (nothing to earn).
+    """
+    if tvl <= 0.0 or irm.initial_borrows_usd <= 0.0:
+        return 0.0
+    util = min(irm.initial_borrows_usd / tvl, 1.0)
+    if util <= irm.optimal_util:
+        borrow_rate = irm.base_rate + (util / max(irm.optimal_util, 1e-9)) * irm.slope1
+    else:
+        excess = (util - irm.optimal_util) / max(1.0 - irm.optimal_util, 1e-9)
+        borrow_rate = irm.base_rate + irm.slope1 + excess * irm.slope2
+    return borrow_rate * util * (1.0 - irm.reserve_factor)
+
 
 # ============================================================================
 # CAMPAIGN CONFIGURATION (immutable per simulation run)
@@ -52,6 +119,11 @@ class CampaignConfig:
 
     # Supply cap (0 = unlimited)
     supply_cap: float = 0.0  # USD — max TVL the venue can accept
+
+    # Interest Rate Model (optional — enables dynamic base APY feedback)
+    # When set, base_apy is recomputed each simulation step from IRM as TVL changes.
+    # When None, base_apy is static for the entire simulation.
+    irm_params: Optional[IRMParams] = None
 
     # Whale profiles for proximity penalty calculation
     whale_profiles: tuple = ()  # tuple of WhaleProfile (immutable)
