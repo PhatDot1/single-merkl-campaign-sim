@@ -1,3 +1,4 @@
+git push
 """
 Tests for Set APR mode — budget minimization with APR floor enforcement.
 
