@@ -178,6 +178,9 @@ class SurfaceResult:
     # Per-point detailed results
     mc_results: dict[tuple[int, int], MonteCarloResult] = field(default_factory=dict)
 
+    # Informational messages set by callers (e.g. cap-proximity taper)
+    cap_taper_info: str | None = None
+
     @property
     def optimal_indices(self) -> tuple[int, int]:
         """Indices of optimal (feasible, minimum loss) point."""
@@ -400,6 +403,91 @@ class SurfaceResult:
 
         lines.append("")
         return "\n".join(lines)
+
+
+# ============================================================================
+# CAP-PROXIMITY UTILITIES
+# ============================================================================
+
+_WEEKS_PER_YEAR = 365.0 / 7.0  # ≈ 52.14
+
+
+def cap_proximity_r_max_ceiling(
+    weekly_budget: float,
+    supply_cap_usd: float,
+    buffer: float = 0.05,
+) -> float:
+    """
+    Return the highest r_max (incentive APR, decimal) that is *useful* given
+    a supply cap.
+
+    Rationale: once TVL hits the supply cap, the campaign cannot attract more
+    deposits regardless of how high r_max is set.  The breakeven r_max is the
+    annualised weekly budget spread across the full supply cap:
+
+        r_max_ceiling = (weekly_budget × 52.14 / supply_cap_usd) × (1 + buffer)
+
+    Setting r_max above this ceiling wastes budget on APR headroom that can
+    never be reached.  The caller should clip the upper edge of their r_max
+    grid to this value when target_tvl / supply_cap > CAP_PROXIMITY_THRESHOLD.
+
+    Args:
+        weekly_budget:  Maximum weekly budget considered for the grid (USD/wk).
+        supply_cap_usd: Supply cap in USD (must be > 0).
+        buffer:         Fractional headroom above the theoretical ceiling
+                        (default 5 %).  Prevents exactly touching the cap.
+
+    Returns:
+        r_max ceiling as a decimal APR (e.g. 0.08 = 8 %).
+
+    Raises:
+        ValueError: if supply_cap_usd <= 0.
+    """
+    if supply_cap_usd <= 0:
+        raise ValueError(f"supply_cap_usd must be positive, got {supply_cap_usd}")
+    return (weekly_budget * _WEEKS_PER_YEAR / supply_cap_usd) * (1.0 + buffer)
+
+
+#: Minimum ratio of target_tvl / supply_cap that triggers cap-proximity taper.
+#: Above this threshold the grid's r_max upper edge is clipped.
+CAP_PROXIMITY_THRESHOLD: float = 0.9
+
+
+def apply_cap_proximity_taper(
+    r_max_max: float,
+    b_max: float,
+    target_tvl: float,
+    supply_cap_usd: float,
+    buffer: float = 0.05,
+    threshold: float = CAP_PROXIMITY_THRESHOLD,
+) -> tuple[float, bool]:
+    """
+    Optionally clip the r_max upper edge of a surface grid.
+
+    When target_tvl / supply_cap_usd > threshold the caller is planning to
+    fill > 90 % of the cap.  Any r_max above the ceiling is unreachable, so
+    we clip r_max_max to avoid wasting grid resolution on infeasible cells.
+
+    Args:
+        r_max_max:      Proposed upper bound for r_max grid (decimal APR).
+        b_max:          Maximum weekly budget in the grid (USD/wk).
+        target_tvl:     TVL the campaign aims to attract (USD).
+        supply_cap_usd: Supply cap in USD (0 = unlimited, no taper applied).
+        buffer:         Headroom passed to cap_proximity_r_max_ceiling.
+        threshold:      Cap-fill ratio that activates taper (default 0.9).
+
+    Returns:
+        (clipped_r_max_max, taper_applied)
+        where taper_applied is True iff the ceiling was lower than r_max_max.
+    """
+    if supply_cap_usd <= 0 or target_tvl <= 0:
+        return r_max_max, False
+    if target_tvl / supply_cap_usd <= threshold:
+        return r_max_max, False
+    ceiling = cap_proximity_r_max_ceiling(b_max, supply_cap_usd, buffer)
+    if ceiling >= r_max_max:
+        return r_max_max, False
+    return ceiling, True
 
 
 # ============================================================================

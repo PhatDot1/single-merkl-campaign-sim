@@ -53,7 +53,12 @@ from campaign.data import (  # noqa: E402
     fetch_stablecoin_class_benchmark,
 )
 from campaign.engine import LossWeights  # noqa: E402
-from campaign.optimizer import SurfaceGrid, SurfaceResult, optimize_surface  # noqa: E402
+from campaign.optimizer import (  # noqa: E402
+    SurfaceGrid,
+    SurfaceResult,
+    apply_cap_proximity_taper,
+    optimize_surface,
+)
 from campaign.state import CampaignEnvironment  # noqa: E402
 from campaign.venue_registry import (  # noqa: E402
     GLOBAL_R_MAX_CEILING,
@@ -223,12 +228,11 @@ def _fetch_whales_for_venue(
         )
 
 
-def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
+def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float, float]:
     """
-    Fetch live current TVL and utilization for a venue.
-    Returns (current_tvl_usd, current_utilization_decimal).
-
-    Falls back to hardcoded values if fetch fails (with warning).
+    Fetch live current TVL, utilization, and supply cap for a venue.
+    Returns (current_tvl_usd, current_utilization_decimal, supply_cap_usd).
+    supply_cap_usd == 0 means unlimited / not available.
     """
     protocol = venue["protocol"]
     asset = venue["asset"]
@@ -254,9 +258,13 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
             print(f"  -> Calling fetch_aave_reserve_data(asset={asset}, market={market})")
             data = fetch_aave_reserve_data(asset_address, asset, pool_address, market)
             print(
-                f"  OK Fetched: TVL=${data.total_supply_usd / 1e6:.2f}M, Util={data.utilization:.1%}"
+                f"  OK Fetched: TVL=${data.total_supply_usd / 1e6:.2f}M, "
+                f"Util={data.utilization:.1%}, Cap=${data.supply_cap / 1e6:.0f}M"
+                if data.supply_cap > 0
+                else f"  OK Fetched: TVL=${data.total_supply_usd / 1e6:.2f}M, "
+                f"Util={data.utilization:.1%}, Cap=unlimited"
             )
-            return data.total_supply_usd, data.utilization
+            return data.total_supply_usd, data.utilization, data.supply_cap
 
         elif protocol == "euler":
             from campaign.evm_data import EULER_VAULTS, fetch_euler_vault_data
@@ -266,10 +274,12 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
                 raise RuntimeError(f"Unknown Euler vault address for {asset}")
             print(f"  -> Calling fetch_euler_vault_data(asset={asset})")
             data = fetch_euler_vault_data(vault_address=vault_address, asset_symbol=asset)
+            euler_cap_str = f"${data.supply_cap / 1e6:.0f}M" if data.supply_cap > 0 else "unlimited"
             print(
-                f"  OK Fetched: TVL=${data.total_supply_usd / 1e6:.2f}M, Util={data.utilization:.1%}"
+                f"  OK Fetched: TVL=${data.total_supply_usd / 1e6:.2f}M, "
+                f"Util={data.utilization:.1%}, Cap={euler_cap_str}"
             )
-            return data.total_supply_usd, data.utilization
+            return data.total_supply_usd, data.utilization, data.supply_cap
 
         elif protocol == "morpho":
             from campaign.data import fetch_morpho_vault_snapshot
@@ -279,10 +289,13 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
                 raise RuntimeError(f"Morpho venue {venue['name']} has no vault_address")
             print(f"  -> Calling fetch_morpho_vault_snapshot(vault={vault_address[:10]}...)")
             snapshot = fetch_morpho_vault_snapshot(vault_address, chain_id=1)
+            morpho_cap_usd = snapshot.supply_cap_usd
+            morpho_cap_str = f"${morpho_cap_usd / 1e6:.0f}M" if morpho_cap_usd > 0 else "unlimited"
             print(
-                f"  OK Fetched: TVL=${snapshot.total_supply_usd / 1e6:.2f}M, Util={snapshot.utilization:.1%}"
+                f"  OK Fetched: TVL=${snapshot.total_supply_usd / 1e6:.2f}M, "
+                f"Util={snapshot.utilization:.1%}, Cap={morpho_cap_str}"
             )
-            return snapshot.total_supply_usd, snapshot.utilization
+            return snapshot.total_supply_usd, snapshot.utilization, morpho_cap_usd
 
         elif protocol == "kamino" and venue.get("kamino_vault_pubkey"):
             from campaign.kamino_data import fetch_kamino_vault_metrics
@@ -291,7 +304,7 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
             print(f"  -> Calling fetch_kamino_vault_metrics(pubkey={pubkey[:10]}...)")
             metrics = fetch_kamino_vault_metrics(pubkey)
             print(f"  OK Fetched: TVL=${metrics.total_tvl_usd / 1e6:.2f}M, Util=N/A (vault)")
-            return metrics.total_tvl_usd, 0.0
+            return metrics.total_tvl_usd, 0.0, 0.0
 
         elif protocol == "kamino" and venue.get("kamino_reserve_pubkey"):
             from campaign.kamino_data import fetch_kamino_lend_snapshot
@@ -305,7 +318,7 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
             print(
                 f"  OK Fetched: TVL=${snapshot['total_supply_usd'] / 1e6:.2f}M, Util={snapshot['utilization']:.1%}"
             )
-            return snapshot["total_supply_usd"], snapshot["utilization"]
+            return snapshot["total_supply_usd"], snapshot["utilization"], 0.0
 
         elif protocol == "kamino" and venue.get("kamino_market_name"):
             from campaign.kamino_data import fetch_kamino_reserve_for_asset
@@ -320,7 +333,7 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
             print(
                 f"  OK Fetched: TVL=${reserve.total_supply_usd / 1e6:.2f}M, Util={reserve.utilization:.1%}"
             )
-            return reserve.total_supply_usd, reserve.utilization
+            return reserve.total_supply_usd, reserve.utilization, 0.0
 
         elif protocol == "kamino" and venue.get("kamino_strategy_pubkey"):
             from campaign.kamino_data import fetch_kamino_strategy_metrics
@@ -329,7 +342,7 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
             print(f"  -> Calling fetch_kamino_strategy_metrics(pubkey={pubkey[:10]}...)")
             metrics = fetch_kamino_strategy_metrics(pubkey)
             print(f"  OK Fetched: TVL=${metrics.total_value_locked / 1e6:.2f}M, Util=N/A (CLMM)")
-            return metrics.total_value_locked, 0.0
+            return metrics.total_value_locked, 0.0, 0.0
 
         elif protocol == "curve":
             import requests
@@ -377,7 +390,7 @@ def _fetch_current_tvl_and_util(venue: dict) -> tuple[float, float]:
                 f"  OK Fetched from DeFiLlama: {best_match.get('symbol')} TVL=${tvl_usd / 1e6:.2f}M"
             )
 
-            return tvl_usd, 0.0
+            return tvl_usd, 0.0, 0.0
 
         elif protocol == "kamino":
             print("  Warning: Kamino venue missing identifying info")
@@ -757,6 +770,24 @@ def run_venue_optimization(
         r_lo, r_hi = r_lo_eff, r_hi_eff
         r_steps = GRID_R_STEPS
 
+    # Cap-proximity taper: if target TVL is near the supply cap, clip r_max_max
+    # to the highest useful APR ceiling (budget spread over the cap + 5 % buffer).
+    _cap_taper_info: str | None = None
+    if pinned_r_max is None:
+        r_hi, _taper_applied = apply_cap_proximity_taper(
+            r_max_max=r_hi,
+            b_max=b_max,
+            target_tvl=target_tvl,
+            supply_cap_usd=supply_cap,
+        )
+        if _taper_applied:
+            _cap_taper_info = (
+                f"r_max grid ceiling tapered to {r_hi:.2%} "
+                f"(supply cap proximity: target={target_tvl:,.0f} / cap={supply_cap:,.0f} = "
+                f"{target_tvl/supply_cap:.0%})"
+            )
+            print(f"  [{venue['name']}] Cap-proximity taper applied: {_cap_taper_info}")
+
     print(
         f"  [{venue['name']}] Grid: B=[${b_min:,.0f}, ${b_max:,.0f}] ({b_steps} pts), "
         f"r_max=[{r_lo:.2%}, {r_hi:.2%}] ({r_steps} pts)"
@@ -822,7 +853,7 @@ def run_venue_optimization(
         max_capital_usd=target_tvl * 0.1,
     )
 
-    return optimize_surface(
+    result = optimize_surface(
         grid=grid,
         env=env,
         initial_tvl=venue["current_tvl"],
@@ -834,6 +865,8 @@ def run_venue_optimization(
         apy_sensitive_config=apy_sensitive_config,
         verbose=False,
     )
+    result.cap_taper_info = _cap_taper_info
+    return result
 
 
 # ============================================================================
@@ -1352,9 +1385,10 @@ def main():
     _sv_autofetch_key = f"sv_autofetched_{_sv_venue_id}"
     if _sv_autofetch_key not in st.session_state:
         with st.spinner(f"Fetching live data for {sv_venue['name']}..."):
-            # 1. Fetch TVL + utilization
+            # 1. Fetch TVL + utilization + supply cap
+            _af_supply_cap = 0.0
             try:
-                _af_tvl, _af_util = _fetch_current_tvl_and_util(sv_venue)
+                _af_tvl, _af_util, _af_supply_cap = _fetch_current_tvl_and_util(sv_venue)
             except Exception as _e:
                 _af_tvl = sv_venue.get("current_tvl", 0.0)
                 _af_util = sv_venue.get("target_util", 0.5)
@@ -1375,6 +1409,7 @@ def main():
                 _af_existing[sv_venue["name"]] = {
                     "current_tvl": _af_tvl,
                     "current_util": _af_util,
+                    "supply_cap": _af_supply_cap,
                 }
                 st.session_state[_af_cache_key] = _af_existing
 
@@ -1434,7 +1469,8 @@ def main():
     _sv_base_preview_key = f"sv_base_apy_{sv_venue['name']}"
     _sv_base_preview = st.session_state.get(_sv_base_preview_key, 0.0)
 
-    _sv_default_supply_cap = sv_venue.get("supply_cap", 0.0)
+    # Supply cap: prefer live-fetched value from session cache; fall back to static venue definition
+    _sv_default_supply_cap = _sv_cached.get("supply_cap", sv_venue.get("supply_cap", 0.0))
 
     # Show auto-fill summary
     _sv_rthresh_key_af = f"sv_rthresh_{sv_venue['asset']}"
@@ -2424,6 +2460,14 @@ def main():
         )
 
     sv_tb = t_bind(sv_B, sv_r)
+
+    # Cap-proximity taper notice
+    if sv_sr.cap_taper_info:
+        st.info(
+            f"**Supply cap proximity — r_max grid clipped:** {sv_sr.cap_taper_info}. "
+            "r_max values above this ceiling cannot attract additional TVL because the "
+            "supply cap is already the binding constraint."
+        )
 
     st.markdown("---")
     _result_mode = ir.get("mode", "set_budget")

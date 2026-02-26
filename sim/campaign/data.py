@@ -31,6 +31,16 @@ from .engine import LossWeights
 from .optimizer import SurfaceGrid
 from .state import CampaignEnvironment
 
+try:
+    from .venue_registry import get_all_venue_addresses as _get_all_venue_addresses_impl
+
+    def get_all_venue_addresses(asset: str) -> set[str]:
+        return _get_all_venue_addresses_impl(asset)
+except ImportError:
+
+    def get_all_venue_addresses(asset: str) -> set[str]:  # type: ignore[misc]
+        return set()
+
 # ============================================================================
 # CONSTANTS
 # ============================================================================
@@ -193,6 +203,13 @@ class VaultSnapshot:
         if self.total_supply_assets == 0:
             return 0.0
         return self.cash / self.total_supply_assets
+
+    @property
+    def supply_cap_usd(self) -> float:
+        """Supply cap in USD (0 = unlimited)."""
+        if self.supply_cap == 0:
+            return 0.0
+        return self.supply_cap / (10**self.asset_decimals) * self.asset_price_usd
 
     @property
     def supply_cap_utilization(self) -> float:
@@ -411,29 +428,39 @@ def fetch_euler_vault_snapshot(
     Reads off-chain: Euler price API
     Reads logs: ERC20 Transfer events to reconstruct depositor balances
     """
-    # ── On-chain reads ──
-    CASH_SEL = "0xe0a65f58"  # cash()
+    # ── On-chain reads (Euler V2 / ERC4626) ──
+    # NOTE: cash() (0xe0a65f58) is Euler V1 only — use totalAssets() for V2.
+    TOTAL_ASSETS_SEL = "0x01e1d114"  # totalAssets()  ERC4626 standard
     TOTAL_BORROWS_SEL = "0x47bd3718"  # totalBorrows()
-    CAPS_SEL = "0x18442059"  # caps()
-    TOTAL_SUPPLY_SEL = "0x18160ddd"  # totalSupply() (ERC20)
+    # caps() selector matches evm_data.py for consistency (two uint256 ABI slots).
+    CAPS_SEL = "0x18aab3e0"  # caps() → (uint256 supplyCap, uint256 borrowCap) Euler V2
     ASSET_SEL = "0x38d52e0f"  # asset()
     DECIMALS_SEL = "0x313ce567"  # decimals()
 
-    cash_raw = decode_uint256(eth_call(rpc_url, vault_address, CASH_SEL))
+    total_assets_raw = decode_uint256(eth_call(rpc_url, vault_address, TOTAL_ASSETS_SEL))
     borrows_raw = decode_uint256(eth_call(rpc_url, vault_address, TOTAL_BORROWS_SEL))
-    caps_result = eth_call(rpc_url, vault_address, CAPS_SEL)
-    # caps returns (uint16 supplyCap, uint16 borrowCap)
-    caps_hex = caps_result[2:]  # strip 0x
-    supply_cap_encoded = decode_uint256("0x" + caps_hex[:64])
-    borrow_cap_encoded = decode_uint256("0x" + caps_hex[64:128])
+    cash_raw = max(0, total_assets_raw - borrows_raw)  # idle = totalAssets - totalBorrows
 
-    _total_supply_raw = decode_uint256(eth_call(rpc_url, vault_address, TOTAL_SUPPLY_SEL))
     asset_addr = decode_address(eth_call(rpc_url, vault_address, ASSET_SEL))
     asset_decimals = decode_uint256(eth_call(rpc_url, asset_addr, DECIMALS_SEL))
 
-    # Resolve Euler-style encoded caps
-    supply_cap = _resolve_euler_cap(supply_cap_encoded)
-    borrow_cap = _resolve_euler_cap(borrow_cap_encoded)
+    # Decode caps: two consecutive uint256 slots (supplyCap, borrowCap) in raw token units.
+    # 0 = unlimited; type(uint256).max = disabled (treated as unlimited).
+    supply_cap: int = 0
+    borrow_cap: int = 0
+    try:
+        caps_result = eth_call(rpc_url, vault_address, CAPS_SEL)
+        caps_hex = caps_result[2:]  # strip 0x
+        if len(caps_hex) >= 128:
+            supply_cap_raw = decode_uint256("0x" + caps_hex[:64])
+            borrow_cap_raw = decode_uint256("0x" + caps_hex[64:128])
+            # Treat values above 2^128 as unlimited (type(uint256).max sentinel)
+            if 0 < supply_cap_raw < (1 << 128):
+                supply_cap = supply_cap_raw
+            if 0 < borrow_cap_raw < (1 << 128):
+                borrow_cap = borrow_cap_raw
+    except Exception as _cap_err:
+        print(f"  Note: Could not decode Euler caps for {vault_address[:10]}: {_cap_err}")
 
     # ── Price from Euler API ──
     price_data = _fetch_euler_prices(chain_id)
@@ -460,9 +487,9 @@ def fetch_euler_vault_snapshot(
         asset_decimals=asset_decimals,
         asset_symbol=asset_symbol,
         asset_price_usd=asset_price,
-        total_supply_assets=cash_raw + borrows_raw,  # totalAssets = cash + borrows
+        total_supply_assets=total_assets_raw,  # totalAssets() from ERC4626
         total_borrows=borrows_raw,
-        cash=cash_raw,
+        cash=cash_raw,  # idle = totalAssets - totalBorrows
         supply_cap=supply_cap,
         borrow_cap=borrow_cap,
         top_depositors=depositors,
@@ -592,6 +619,95 @@ class CompetitorRate:
     apy_total: float  # Total APY as DECIMAL
 
 
+@dataclass
+class CompetitorVenue:
+    """
+    Enriched competitor venue with capacity and switching-cost data.
+
+    Extends CompetitorRate with fields needed for:
+    - Capacity-filtered whale exit modeling (does this venue have room?)
+    - Switching-cost-adjusted r_threshold (what does it cost to move capital?)
+
+    All APY/APR values are DECIMAL (0.035 = 3.5%).
+    supply_cap_usd = 0 means no cap known / unlimited.
+    available_capacity_usd = 0 means unknown or fully capped.
+    swap_cost_bps: round-trip cost to enter this venue from typical stablecoin
+      (DEX slippage + gas, annualised separately in threshold math).
+    """
+
+    # --- Core fields (same as CompetitorRate) ---
+    venue: str
+    pool_id: str
+    symbol: str
+    tvl_usd: float
+    apy_base: float
+    apy_reward: float
+    apy_total: float
+    chain: str = "Ethereum"
+    protocol: str = "unknown"
+
+    # --- Capacity fields ---
+    supply_cap_usd: float = 0.0        # 0 = unlimited / unknown
+    available_capacity_usd: float = 0.0  # supply_cap_usd - tvl_usd (0 = unlimited)
+    utilization: float = 0.0
+
+    # --- Cost fields ---
+    swap_cost_bps: float = 5.0         # One-way swap/bridge cost in basis points
+    gas_cost_usd: float = 5.0          # Typical deposit gas cost in USD
+
+    @property
+    def effective_apy(self) -> float:
+        """APY net of annualised one-way switching cost (assuming 52-week hold)."""
+        annualised_cost = self.swap_cost_bps / 10_000  # one-way, 1 year
+        return max(self.apy_total - annualised_cost, 0.0)
+
+    def to_competitor_rate(self) -> CompetitorRate:
+        """Backward-compatible downcast to CompetitorRate."""
+        return CompetitorRate(
+            venue=self.venue,
+            pool_id=self.pool_id,
+            symbol=self.symbol,
+            tvl_usd=self.tvl_usd,
+            apy_base=self.apy_base,
+            apy_reward=self.apy_reward,
+            apy_total=self.apy_total,
+        )
+
+    @classmethod
+    def from_competitor_rate(cls, cr: CompetitorRate, **kwargs: object) -> CompetitorVenue:
+        """Upgrade a CompetitorRate to CompetitorVenue with optional enrichment."""
+        return cls(
+            venue=cr.venue,
+            pool_id=cr.pool_id,
+            symbol=cr.symbol,
+            tvl_usd=cr.tvl_usd,
+            apy_base=cr.apy_base,
+            apy_reward=cr.apy_reward,
+            apy_total=cr.apy_total,
+            **kwargs,
+        )
+
+
+# ── Swap-cost heuristics ──
+# Same-chain stablecoin swap (Uniswap V3 / 1inch on Ethereum): ~2 bps
+# Same-chain with thin liquidity: ~5 bps
+# Cross-chain bridge (Across, Stargate, CCTP): ~15 bps
+_SAME_CHAIN_CHAINS = {"ethereum", "eth"}
+
+
+def _estimate_swap_cost_bps(chain: str, protocol: str) -> float:
+    """Heuristic one-way swap cost in basis points for entering this venue."""
+    chain_lc = chain.lower()
+    proto_lc = protocol.lower()
+    if chain_lc in _SAME_CHAIN_CHAINS:
+        # Stablecoin swaps on Ethereum mainnet are very cheap
+        if any(k in proto_lc for k in ("curve", "uniswap", "balancer")):
+            return 1.0  # AMM direct route
+        return 2.0  # lending protocol (approve + deposit, 1 DEX hop)
+    # Cross-chain (Solana, Arbitrum, Base, etc.)
+    return 15.0
+
+
 def fetch_competitor_rates(
     asset_symbol: str = "PYUSD",
     min_tvl: float = 1_000_000,
@@ -636,15 +752,11 @@ def fetch_competitor_rates(
     # Build set of ALL our own venue addresses to exclude
     own_addresses: set[str] = set()
     if exclude_all_own_venues:
-        try:
-            from .venue_registry import get_all_venue_addresses
-
-            own_addresses = get_all_venue_addresses(asset_symbol)
+        own_addresses = get_all_venue_addresses(asset_symbol)
+        if own_addresses:
             print(f"  Excluding {len(own_addresses)} own venue addresses from competitors")
-        except ImportError:
-            print(
-                "  WARNING: venue_registry not available, using single exclude_vault_address only"
-            )
+        else:
+            print("  WARNING: venue_registry returned no addresses, using single exclude_vault_address only")
 
     raw = []
     for pool in pools:
@@ -725,6 +837,110 @@ def fetch_competitor_rates(
     return competitors
 
 
+def fetch_competitor_venues(
+    asset_symbol: str = "PYUSD",
+    min_tvl: float = 1_000_000,
+    exclude_pool_ids: list[str] | None = None,
+    exclude_vault_address: str | None = None,
+    exclude_all_own_venues: bool = True,
+) -> list[CompetitorVenue]:
+    """
+    Enriched competitor fetch: CompetitorRate + capacity + switching-cost data.
+
+    Builds on fetch_competitor_rates() and upgrades each entry to
+    CompetitorVenue by adding:
+    - chain / protocol from DeFiLlama pool metadata
+    - supply_cap_usd / available_capacity_usd (0 = unlimited / unknown)
+    - swap_cost_bps derived from chain + protocol heuristics
+    - gas_cost_usd (fixed EVM estimate)
+
+    Note: DeFiLlama does not expose supply caps, so capacity fields will be
+    0 for most venues unless we can enrich from a secondary source (Morpho
+    GraphQL, on-chain RPC).  The capacity-aware whale exit modeling in
+    compute_whale_aware_r_threshold() gracefully handles unknown caps by
+    treating them as unlimited.
+    """
+    try:
+        resp = requests.get(DEFILLAMA_YIELDS_URL, timeout=30)
+        resp.raise_for_status()
+        pools = resp.json().get("data", [])
+    except Exception as e:
+        raise RuntimeError(f"DeFiLlama competitor rate fetch failed: {e}")
+
+    exclude_ids = set(exclude_pool_ids or [])
+    exclude_addr = exclude_vault_address.lower() if exclude_vault_address else None
+
+    own_addresses: set[str] = set()
+    if exclude_all_own_venues:
+        own_addresses = get_all_venue_addresses(asset_symbol)
+
+    raw_venues: list[CompetitorVenue] = []
+    for pool in pools:
+        symbol = pool.get("symbol", "")
+        if asset_symbol.upper() not in symbol.upper():
+            continue
+        tvl = pool.get("tvlUsd", 0)
+        if tvl < min_tvl:
+            continue
+
+        pool_id = pool.get("pool", "")
+        if pool_id in exclude_ids:
+            continue
+        if exclude_addr and exclude_addr in pool_id.lower():
+            continue
+        if own_addresses:
+            pool_id_lower = pool_id.lower()
+            pool_underlying = [t.lower() for t in (pool.get("underlyingTokens") or [])]
+            is_own = any(
+                a in pool_id_lower or any(a in t for t in pool_underlying)
+                for a in own_addresses
+            )
+            if is_own:
+                continue
+
+        apy_base = (pool.get("apyBase") or 0) / 100.0
+        apy_reward = (pool.get("apyReward") or 0) / 100.0
+        apy_total = apy_base + apy_reward
+        if apy_total < 0.001:
+            continue
+
+        chain = pool.get("chain") or "Ethereum"
+        protocol = pool.get("project") or "unknown"
+        swap_bps = _estimate_swap_cost_bps(chain, protocol)
+
+        raw_venues.append(
+            CompetitorVenue(
+                venue=protocol,
+                pool_id=pool_id,
+                symbol=symbol,
+                tvl_usd=tvl,
+                apy_base=apy_base,
+                apy_reward=apy_reward,
+                apy_total=apy_total,
+                chain=chain,
+                protocol=protocol,
+                # Capacity: unknown from DeFiLlama — stays 0.0 (unlimited)
+                supply_cap_usd=0.0,
+                available_capacity_usd=0.0,
+                swap_cost_bps=swap_bps,
+                gas_cost_usd=5.0 if chain.lower() in _SAME_CHAIN_CHAINS else 0.5,
+            )
+        )
+
+    # Deduplicate same as fetch_competitor_rates
+    seen: dict[str, CompetitorVenue] = {}
+    for cv in sorted(raw_venues, key=lambda x: -x.apy_total):
+        tvl_bucket = round(cv.tvl_usd / max(cv.tvl_usd * 0.05, 1_000_000))
+        dedup_key = f"{cv.venue}_{tvl_bucket}"
+        if dedup_key not in seen:
+            seen[dedup_key] = cv
+
+    result = sorted(seen.values(), key=lambda cv: cv.tvl_usd, reverse=True)
+    if not result:
+        print(f"  ⚠ No CompetitorVenue entries found for {asset_symbol}")
+    return result
+
+
 def fetch_usdc_benchmark(
     min_tvl: float = 10_000_000,
     chain: str = "Ethereum",
@@ -794,6 +1010,81 @@ def fetch_usdc_benchmark(
         f"total TVL ${total_tvl / 1e6:,.0f}M)"
     )
     return benchmark
+
+
+def compute_whale_aware_r_threshold(
+    competitors: list[CompetitorVenue],
+    whale_profiles: list,
+    fallback_threshold: float = 0.045,
+    capacity_filter: bool = True,
+    swap_cost_annualised: bool = True,
+) -> float:
+    """
+    Compute r_threshold weighted by each competitor's whale-absorptive capacity.
+
+    A competitor that is nearly full (small available_capacity_usd) is
+    largely irrelevant as an exit destination for large whales.  This
+    function weights each competitor's rate by how much of the largest
+    whale position it could actually absorb.
+
+    Competitors with supply_cap_usd == 0 are treated as unlimited (they
+    can absorb any whale) and receive full weight.
+
+    Args:
+        competitors: list of CompetitorVenue (with capacity data)
+        whale_profiles: list of WhaleProfile objects from the venue being analysed
+        fallback_threshold: returned when no viable competitors remain
+        capacity_filter: if False, skip capacity filtering (classic behaviour)
+        swap_cost_annualised: if True, subtract annualised one-way swap cost
+            from each competitor's effective rate.
+
+    Returns:
+        float: capacity-adjusted r_threshold (decimal)
+    """
+    if not competitors:
+        return fallback_threshold
+
+    max_whale_position = max(
+        (getattr(wp, "position_usd", 0) for wp in whale_profiles), default=0.0
+    )
+    # With no whale data fall back to simple TVL-weighted average
+    if max_whale_position == 0.0 or not capacity_filter:
+        if not competitors:
+            return fallback_threshold
+        total_tvl = sum(c.tvl_usd for c in competitors)
+        if total_tvl == 0:
+            return fallback_threshold
+        rate = sum(c.effective_apy * c.tvl_usd for c in competitors) / total_tvl
+        return min(max(rate, 0.0), 0.08)
+
+    weighted_rates: list[tuple[float, float]] = []
+    for c in competitors:
+        # Determine how much of the largest whale this venue can absorb.
+        # available_capacity_usd == 0 means unlimited (no cap known).
+        if capacity_filter and c.available_capacity_usd > 0:
+            absorbable = min(c.available_capacity_usd, max_whale_position)
+        else:
+            absorbable = max_whale_position  # unlimited / unknown → full weight
+
+        # Skip venues that can absorb < 10 % of the largest whale
+        if capacity_filter and c.available_capacity_usd > 0:
+            if absorbable < max_whale_position * 0.10:
+                continue
+
+        effective_rate = c.effective_apy if swap_cost_annualised else c.apy_total
+        weight = absorbable / max_whale_position
+        weighted_rates.append((effective_rate, weight))
+
+    if not weighted_rates:
+        print(
+            "  compute_whale_aware_r_threshold: all competitors filtered out by capacity. "
+            f"Returning fallback {fallback_threshold:.2%}."
+        )
+        return fallback_threshold
+
+    total_w = sum(w for _, w in weighted_rates)
+    result = sum(r * w for r, w in weighted_rates) / total_w
+    return min(max(result, 0.0), 0.08)
 
 
 def compute_r_threshold(
@@ -1282,9 +1573,13 @@ def _build_whale_profiles(
     Build WhaleProfile objects from depositor data.
 
     Estimates exit thresholds based on:
-    - Competitor rates (alt_rate)
+    - Competitor rates (alt_rate) — capacity-filtered when CompetitorVenue provided
     - Position size (switching costs scale sublinearly)
     - Heuristic whale type classification
+
+    When `competitors` contains CompetitorVenue objects (duck-typed: has
+    available_capacity_usd), alt_rate for each whale is drawn from the set
+    of competitors that can actually absorb that whale's position.
     """
     top_deps = concentration.get("top_depositors", [])
     if not top_deps:
@@ -1326,8 +1621,23 @@ def _build_whale_profiles(
         # Switching cost: gas + slippage, scales with sqrt(position)
         switching_cost = 500 + (position / 10_000_000) * 100
 
-        # Alt rate: jitter around best competitor rate
-        alt_rate = best_alt * (0.85 + 0.25 * (i / max(len(top_deps), 1)))
+        # Alt rate: use capacity-filtered best competitor when available.
+        # If competitors are CompetitorVenue (has available_capacity_usd), filter
+        # out venues that can't absorb at least 10% of this whale's position.
+        whale_best_alt = best_alt
+        if competitors and hasattr(competitors[0], "available_capacity_usd"):
+            viable = [
+                c
+                for c in competitors
+                if (
+                    getattr(c, "available_capacity_usd", 0.0) == 0.0  # unlimited
+                    or getattr(c, "available_capacity_usd", 0.0) >= position * 0.10
+                )
+            ]
+            if viable:
+                whale_best_alt = max(c.apy_total for c in viable)
+
+        alt_rate = whale_best_alt * (0.85 + 0.25 * (i / max(len(top_deps), 1)))
         alt_rate = min(alt_rate, r_threshold + 0.02)
 
         # Risk premium: smaller for larger, more sophisticated depositors
