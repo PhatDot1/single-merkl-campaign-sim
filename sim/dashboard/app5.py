@@ -1442,12 +1442,18 @@ def main():
     _sv_rthresh_val_af = _sv_rthresh_data_af.get("r_threshold", 0.045)
     _sv_base_source_af = st.session_state.get(f"{_sv_base_preview_key}_source", "not fetched")
     if _sv_cached or _sv_base_preview > 0:
+        _sv_cap_display = (
+            f"${_sv_default_supply_cap / 1e6:.0f}M"
+            if _sv_default_supply_cap > 0
+            else "No cap"
+        )
         st.success(
             f"Auto-filled from live data -- "
             f"TVL: ${_sv_default_current_tvl:.1f}M, "
             f"Util: {_sv_default_util:.0f}%, "
             f"Base APY: {_sv_base_preview:.2%} ({_sv_base_source_af}), "
-            f"r_threshold: {_sv_rthresh_val_af:.2%}"
+            f"r_threshold: {_sv_rthresh_val_af:.2%}, "
+            f"Supply cap: {_sv_cap_display}"
         )
 
     # Venue parameters
@@ -1527,26 +1533,43 @@ def main():
             ),
         )
 
-    # Supply Cap
-    sv_supply_cap = (
-        st.number_input(
-            "Supply Cap ($M) -- 0 = unlimited",
-            value=_sv_default_supply_cap / 1e6 if _sv_default_supply_cap > 0 else 0.0,
-            step=10.0,
-            min_value=0.0,
-            key=_svk + "supply_cap",
-            help=(
-                "**What it is:** Maximum TVL the venue can accept (supply cap / deposit limit). "
-                "0 = unlimited. The simulation stops accepting deposits when TVL hits this cap.\n\n"
-                "**How to configure:** Set to the protocol's on-chain supply cap if one exists. "
-                "After running the optimization, check the 'Suggested TVL Cap' advisory in the "
-                "results section for data-driven cap recommendations based on your budget and floor APR.\n\n"
-                "**Effect on simulation:** Caps TVL growth — prevents the incentive rate from "
-                "being diluted below your floor by unlimited TVL growth."
-            ),
-        )
-        * 1e6
+    # Supply Cap -- show live cap, optional override for planned raises
+    _sv_live_cap_label = (
+        f"${_sv_default_supply_cap / 1e6:.0f}M"
+        if _sv_default_supply_cap > 0
+        else "No cap (unlimited)"
     )
+    sv_cap_override = st.toggle(
+        f"Override supply cap for this campaign  —  current on-chain cap: **{_sv_live_cap_label}**",
+        value=False,
+        key=_svk + "cap_override",
+        help=(
+            "Enable this when you plan to **raise the supply cap before launching this campaign**. "
+            "The optimizer will simulate TVL growth up to the new cap, not the current on-chain one. "
+            "Leave off to use the live on-chain cap as the ceiling."
+        ),
+    )
+    if sv_cap_override:
+        sv_supply_cap = (
+            st.number_input(
+                "Planned Supply Cap ($M)  —  set 0 to remove cap entirely",
+                value=max(
+                    _sv_default_supply_cap / 1e6 * 1.5 if _sv_default_supply_cap > 0 else 0.0,
+                    _sv_default_current_tvl,
+                ),
+                step=10.0,
+                min_value=0.0,
+                key=_svk + "supply_cap_override",
+                help=(
+                    "The supply cap you plan to set **before** launching this campaign. "
+                    "Set to 0 if you plan to remove the cap entirely (unlimited TVL). "
+                    "The optimizer will simulate deposits growing up to this cap."
+                ),
+            )
+            * 1e6
+        )
+    else:
+        sv_supply_cap = _sv_default_supply_cap
 
     # ==================================================================
     # MODE SELECTOR: Enforce Budget vs Enforce APR
