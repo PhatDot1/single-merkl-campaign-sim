@@ -692,6 +692,7 @@ def run_venue_optimization(
     apy_sensitive_config: APYSensitiveConfig | None = None,
     r_max_range: tuple[float, float] = (0.02, 0.15),
     supply_cap: float = 0.0,
+    target_inc_apr: float = 0.0,
 ) -> SurfaceResult:
     """Run full MC surface optimization for one venue."""
     WEEKS_PER_YEAR = 365.0 / 7.0  # 52.14
@@ -772,6 +773,8 @@ def run_venue_optimization(
         horizon_days=HORIZON_DAYS,
         base_apy=base_apy,
         supply_cap=supply_cap,
+        target_inc_apr=target_inc_apr,
+        target_tvl_for_feasibility=target_tvl if target_inc_apr > 0 else 0.0,
     )
 
     env = CampaignEnvironment(r_threshold=r_threshold)
@@ -950,7 +953,7 @@ def main():
                         "important for vaults with depositors who monitor APR daily.\n"
                         "- **Lower/0:** Allows APR to fluctuate more — appropriate for vaults with "
                         "sticky capital that doesn't react to short-term rate changes.\n\n"
-                        "**In Set APR mode:** Automatically boosted ×1.5 to keep rates steady around target."
+                        "**In Enforce APR mode:** Automatically boosted ×1.5 to keep rates steady around target."
                     ),
                 )
             with wc2:
@@ -968,7 +971,7 @@ def main():
                         "produce APR spikes above the ceiling. Essential for stablecoin pools.\n"
                         "- **Lower/0:** Allows APR spikes (e.g., during low-TVL periods). May attract "
                         "mercenary capital that enters at high APR then leaves when it normalizes.\n\n"
-                        "**In Set APR mode:** Automatically boosted ×2 to strictly enforce the ceiling."
+                        "**In Enforce APR mode:** Automatically boosted ×2 to strictly enforce the ceiling."
                     ),
                 )
                 w_tvl_short = st.number_input(
@@ -1034,7 +1037,7 @@ def main():
                         "configs that breach it even briefly. Essential for APY-sensitive vaults.\n"
                         "- **Lower:** Floor is advisory — optimizer may accept occasional dips below "
                         "if other objectives (spend, TVL) improve significantly.\n\n"
-                        "**In Set APR mode:** Automatically raised to ≥15 to make the target APR "
+                        "**In Enforce APR mode:** Automatically raised to ≥15 to make the target APR "
                         "a hard constraint."
                     ),
                 )
@@ -1546,90 +1549,89 @@ def main():
     )
 
     # ==================================================================
-    # MODE SELECTOR: Budget vs Set APR
+    # MODE SELECTOR: Enforce Budget vs Enforce APR
     # ==================================================================
     st.markdown("---")
     sv_mode = st.radio(
         "**Optimization Mode**",
-        ["Set Budget", "Set APR"],
+        ["Enforce Budget", "Enforce APR"],
+        index=1,
         key=_svk + "mode",
         horizontal=True,
         help=(
-            "**Set Budget:** You specify a weekly budget ceiling. The optimizer "
+            "**Enforce Budget:** You specify a weekly budget ceiling. The optimizer "
             "finds the best (B, r_max) pair within that budget.\n\n"
-            "**Set APR:** You specify the total APR you want maintained at both "
-            "current and target TVL. Budget and r_max are derived automatically."
+            "**Enforce APR:** You specify the incentive APR you want maintained at "
+            "target TVL. Budget and r_max are derived automatically to meet that target."
         ),
     )
 
-    _is_set_apr_mode = "Set APR" in sv_mode
+    _is_set_apr_mode = "Enforce APR" in sv_mode
 
     WEEKS_PER_YEAR_UI = 365.0 / 7.0
 
     if _is_set_apr_mode:
-        # SET APR MODE
+        # ENFORCE APR MODE
         st.info(
-            "**Set APR Mode -- Budget Minimizer:** Specify the total APR you want "
-            "maintained. The optimizer searches for the **cheapest** (B, r_max) pair "
-            "that keeps total APR >= your target throughout the simulation -- including "
+            "**Enforce APR Mode -- Budget Minimizer:** Specify the incentive APR you want "
+            "delivered at target TVL. The optimizer searches for the **cheapest** (B, r_max) pair "
+            "that keeps incentive APR >= your target throughout the simulation -- including "
             "whale exits, TVL fluctuations, and competitor dynamics.\n\n"
             "The derived budget shown below is the **theoretical maximum** needed. "
             "The optimizer will try to find a cheaper configuration that still meets "
-            "the APR target."
+            "the incentive APR target."
         )
 
         sv_apr_c1, sv_apr_c2, sv_apr_c3, sv_apr_c4 = st.columns(4)
         with sv_apr_c1:
-            sv_set_apr_total = (
+            sv_target_inc_apr = (
                 st.number_input(
-                    "Target Total APR (%)",
+                    "Target Incentive APR (%)",
                     value=5.0,
                     step=0.25,
                     min_value=0.5,
                     key=_svk + "set_apr",
                     help=(
-                        "**What it is:** The total APR (base + incentive) you want depositors "
-                        "to earn at both current and target TVL.\n\n"
+                        "**What it is:** The incentive-only APR (Merkl rewards, excluding base yield) "
+                        "you want depositors to earn at target TVL.\n\n"
                         "**How it works:** The optimizer finds the minimum weekly budget that "
-                        "maintains this total APR throughout the simulation — including whale "
-                        "exits, TVL fluctuations, and competitor dynamics.\n\n"
-                        "**How to configure:** Set this to the rate you need to attract/retain "
-                        "capital. Check r_threshold for competitive context — your target should "
-                        "be at or above the competitor rate to attract TVL."
+                        "delivers at least this incentive APR at target TVL throughout the "
+                        "simulation including whale exits, TVL fluctuations, and competitor dynamics.\n\n"
+                        "**How to configure:** Set this to the incentive rate needed to attract/retain "
+                        "capital on top of the venue's base APY. Total APR = base APY + this value."
                     ),
                 )
                 / 100.0
             )
         with sv_apr_c2:
-            sv_apr_floor_input = (
+            sv_floor_inc_apr = (
                 st.number_input(
-                    "Floor APR (%)",
-                    value=sv_set_apr_total * 100,
+                    "Incentive APR Floor (%)",
+                    value=sv_target_inc_apr * 100,
                     step=0.25,
                     min_value=0.0,
                     key=_svk + "set_apr_floor",
                     help=(
-                        "**What it is:** The minimum acceptable total APR. When APR drops below "
-                        "this floor, the optimizer penalizes that configuration heavily.\n\n"
+                        "**What it is:** The minimum acceptable incentive APR. When the incentive "
+                        "rate drops below this floor, the optimizer penalizes that configuration heavily.\n\n"
                         "**How it works:** This creates a soft or hard lower bound (controlled by "
-                        "Floor Strictness). The optimizer avoids configs where the APR "
+                        "Floor Strictness). The optimizer avoids configs where the incentive APR "
                         "frequently dips below this level across Monte Carlo paths.\n\n"
                         "**How to configure:**\n"
-                        "- Set equal to Target APR for a hard minimum (APR must never drop below)\n"
+                        "- Set equal to Target Incentive APR for a hard minimum\n"
                         "- Set slightly below Target for a soft buffer (brief dips tolerated)\n"
                         "- Set to 0 to disable floor enforcement entirely\n\n"
                         "**When it matters:** APY-sensitive vaults with loopers/leveraged positions "
-                        "need a tight floor — these depositors will exit immediately if the rate drops. "
-                        "Vaults with sticky institutional capital can tolerate a looser floor."
+                        "need a tight floor. Vaults with sticky institutional capital can tolerate a looser floor."
                     ),
                 )
                 / 100.0
             )
         with sv_apr_c3:
-            sv_apr_ceiling_total = (
+            sv_ceiling_inc_apr = (
                 st.number_input(
-                    "Total APR Ceiling (%)",
-                    value=min(10.0, sv_set_apr_total * 100 * 2),
+                    "Incentive APR Ceiling (%)",
+                    value=min(10.0, sv_target_inc_apr * 100 * 2),
                     step=0.5,
                     min_value=1.0,
                     key=_svk + "apr_ceiling",
@@ -1682,43 +1684,44 @@ def main():
                 ),
             )
 
-        _sv_set_inc_rate = max(0.005, sv_set_apr_total - _sv_base_preview)
+        _sv_set_inc_rate = max(0.005, sv_target_inc_apr)
         _sv_ref_tvl = max(sv_current_tvl, sv_target_tvl)
         _sv_derived_budget = _sv_ref_tvl * _sv_set_inc_rate / WEEKS_PER_YEAR_UI
 
         st.markdown(
             f"**Derived Parameters:**\n"
-            f"- Base APY: **{_sv_base_preview:.2%}** -> "
-            f"Required incentive rate: **{_sv_set_inc_rate:.2%}**\n"
+            f"- Base APY (informational): **{_sv_base_preview:.2%}** "
+            f"(total APR at target will be ~{sv_target_inc_apr + _sv_base_preview:.2%})\n"
             f"- Reference TVL (max of current/target): "
             f"**${_sv_ref_tvl / 1e6:.1f}M**\n"
             f"- Budget search ceiling: **${_sv_derived_budget * 1.1:,.0f}/wk** "
             f"(derived ${_sv_derived_budget:,.0f}/wk + 10% headroom)\n"
-            f"- r_max search range: **{_sv_set_inc_rate:.2%}** -- "
-            f"**{sv_apr_ceiling_total:.2%}** (incentive, protocol-clamped)\n"
+            f"- r_max search range: **{sv_target_inc_apr:.2%}** -- "
+            f"**{sv_ceiling_inc_apr:.2%}** (incentive, protocol-clamped)\n"
             f"- Optimizer objective: **minimize budget** while keeping "
-            f"total APR >= {sv_set_apr_total:.2%}"
+            f"incentive APR >= {sv_target_inc_apr:.2%} at target TVL"
         )
 
         if _sv_base_preview <= 0:
             st.warning(
-                "Base APY not fetched yet -- derived budget assumes 0% base. "
-                "Fetch base APY below for accurate derivation."
+                "Base APY not fetched yet -- base APY shown as 0%. "
+                "Fetch base APY below for accurate total APR estimate."
             )
 
         sv_budget = _sv_derived_budget * 1.1
-        sv_floor_apr = sv_apr_floor_input
+        # Convert incentive APR inputs to total APR for engine compatibility
+        sv_floor_apr = sv_floor_inc_apr + _sv_base_preview
         sv_apr_sensitivity = sv_set_apr_sensitivity
         sv_forced_rate = None
         sv_pin_b_val = None
         sv_pin_r_val = None
-        sv_r_lo_total = sv_set_apr_total
-        sv_r_hi_total = sv_apr_ceiling_total
+        sv_r_lo_total = sv_target_inc_apr + _sv_base_preview
+        sv_r_hi_total = sv_ceiling_inc_apr + _sv_base_preview
 
     else:
-        # SET BUDGET MODE (existing behavior)
+        # ENFORCE BUDGET MODE (existing behavior)
         st.info(
-            "**Set Budget Mode:** You specify the weekly budget ceiling. "
+            "**Enforce Budget Mode:** You specify the weekly budget ceiling. "
             "The optimizer searches for the best (B, r_max) pair within that budget."
         )
 
@@ -2269,7 +2272,7 @@ def main():
             w_whale_proximity=w_whale_proximity,
             w_apr_floor=w_apr_floor if not _is_set_apr_mode else max(w_apr_floor, 15.0),
             apr_target=sv_r_threshold * apr_target_mult,
-            apr_ceiling=sv_apr_ceiling_total if _is_set_apr_mode else apr_ceiling_val,
+            apr_ceiling=sv_r_hi_total if _is_set_apr_mode else apr_ceiling_val,
             tvl_target=sv_target_tvl,
             apr_stability_on_total=True,
             apr_floor=sv_floor_apr,
@@ -2322,6 +2325,7 @@ def main():
                 apy_sensitive_config=sv_apy_sensitive,
                 r_max_range=(_sv_r_lo_inc, _sv_r_hi_inc),
                 supply_cap=sv_supply_cap,
+                target_inc_apr=sv_target_inc_apr if _is_set_apr_mode else 0.0,
             )
             sv_elapsed = time.time() - t0
 
@@ -2355,7 +2359,8 @@ def main():
             "apr_sensitivity": sv_apr_sensitivity,
             "mode": "set_apr" if _is_set_apr_mode else "set_budget",
             "derived_budget": _sv_derived_budget if _is_set_apr_mode else None,
-            "set_apr_target": sv_set_apr_total if _is_set_apr_mode else None,
+            "set_apr_target": sv_target_inc_apr if _is_set_apr_mode else None,
+            "floor_inc_apr": sv_floor_inc_apr if _is_set_apr_mode else None,
         }
 
     # ── Display results ──
@@ -2379,197 +2384,32 @@ def main():
     sv_r = max(sv_r_raw, min(float_rate, sv_venue_ceiling))
 
     if sv_r > sv_r_raw + 1e-6:
-        st.warning(
-            f"**r_max floor applied:** Optimizer picked r_max={sv_r_raw:.2%}, but "
-            f"the float rate at target TVL is {float_rate:.2%}. "
-            f"Raised r_max to {sv_r:.2%} (protocol ceiling: {sv_venue_ceiling:.0%}) "
-            f"so the full budget is deployable."
+        _mode_for_msg = ir.get("mode", "set_budget")
+        _target_for_msg = ir.get("set_apr_target") if _mode_for_msg == "set_apr" else None
+        st.info(
+            f"**r_max adjusted to float rate:** The optimizer selected r_max={sv_r_raw:.2%}, "
+            f"but at target TVL the float rate (B ÷ TVL × 52.14) = {float_rate:.2%}. "
+            f"Since the float rate already exceeds the cap, the cap would never bind — "
+            f"the budget delivers {float_rate:.2%} incentive at target TVL without needing "
+            f"to be limited. r_max has been raised to match the float rate ({sv_r:.2%}) "
+            f"so the full budget is always deployable."
+            + (
+                f" This is slightly above your {_target_for_msg:.2%} target — that's fine."
+                if _target_for_msg
+                else ""
+            )
         )
 
     sv_tb = t_bind(sv_B, sv_r)
 
     st.markdown("---")
     _result_mode = ir.get("mode", "set_budget")
-    _mode_label = "Set APR" if _result_mode == "set_apr" else "Set Budget"
+    _mode_label = "Enforce APR" if _result_mode == "set_apr" else "Enforce Budget"
     st.header(f"Results: {sv_v['name']}  ({_mode_label})")
 
     mc = sv_sr.optimal_mc_result
 
-    # In Set APR mode, show the APR constraint status and budget savings
-    if _result_mode == "set_apr" and mc:
-        _floor = ir.get("floor_apr", 0)
-        _derived_B = ir.get("derived_budget")
-        _set_apr_target = ir.get("set_apr_target", _floor)
-
-        if _floor > 0:
-            _apr_ok = mc.apr_p5 >= _floor * 0.98
-
-            if _derived_B and _derived_B > 0:
-                _savings = _derived_B - sv_B
-                _savings_pct = (_savings / _derived_B) * 100
-                if _savings > 0:
-                    st.success(
-                        f"**Budget optimized:** Optimizer found **${sv_B:,.0f}/wk** "
-                        f"(saved **${_savings:,.0f}/wk** = **{_savings_pct:.0f}%** vs "
-                        f"derived ceiling ${_derived_B:,.0f}/wk) "
-                        f"while maintaining {_floor:.2%} total APR target."
-                    )
-                else:
-                    st.info(
-                        f"**Budget at ceiling:** Optimizer needs **${sv_B:,.0f}/wk** "
-                        f"(approx derived ${_derived_B:,.0f}/wk) to maintain {_floor:.2%} "
-                        f"total APR -- no cheaper feasible configuration found."
-                    )
-
-            if _apr_ok:
-                st.success(
-                    f"**APR constraint met:** Target {_floor:.2%} total APR is maintained. "
-                    f"Simulation p5={mc.apr_p5:.2%}, mean={mc.mean_apr:.2%}."
-                )
-            else:
-                st.error(
-                    f"**APR constraint at risk:** Target {_floor:.2%} total APR, "
-                    f"but simulation p5={mc.apr_p5:.2%} (below target). "
-                    f"Consider increasing the target APR or reducing target TVL."
-                )
-
-            _headroom_abs = mc.apr_p5 - _floor
-            _headroom_mean = mc.mean_apr - _floor
-            _floor_breach_cost = mc.loss_components.get("floor_breach", 0.0)
-            _time_below = mc.mean_time_below_floor
-
-            if _headroom_abs >= _floor * 0.15:
-                _hr_color = "green"
-                _hr_label = "Large headroom"
-                _hr_advice = "Budget could potentially be lowered further."
-            elif _headroom_abs >= _floor * 0.03:
-                _hr_color = "yellow"
-                _hr_label = "Moderate headroom"
-                _hr_advice = "Some room to lower, but limited flexibility."
-            elif _headroom_abs >= 0:
-                _hr_color = "red"
-                _hr_label = "Tight -- at the edge"
-                _hr_advice = "No room to lower budget. Whale exits or TVL spikes may breach floor."
-            else:
-                _hr_color = "black"
-                _hr_label = "BREACHING"
-                _hr_advice = "APR drops below target in worst-case scenarios. Increase budget."
-
-            with st.container(border=True):
-                st.markdown(f"### APR Headroom: {_hr_label}")
-                hr1, hr2, hr3, hr4 = st.columns(4)
-                with hr1:
-                    st.metric(
-                        "p5 Headroom",
-                        f"{_headroom_abs:+.2%}",
-                        help="APR p5 minus floor — worst-case headroom across MC paths.",
-                    )
-                with hr2:
-                    st.metric(
-                        "Mean Headroom",
-                        f"{_headroom_mean:+.2%}",
-                        help="Mean APR minus floor — average headroom.",
-                    )
-                with hr3:
-                    st.metric(
-                        "Time Below Floor",
-                        f"{_time_below:.1%}",
-                        help="Average fraction of simulation time where APR drops below target.",
-                    )
-                with hr4:
-                    st.metric(
-                        "Floor Breach Cost",
-                        f"{_floor_breach_cost:.2e}",
-                        help="Loss component from APR floor breaches (lower = better).",
-                    )
-                st.caption(f"{_hr_advice}")
-
-    # Key metrics
-    rc1, rc2, rc3, rc4, rc5, rc6 = st.columns(6)
-    with rc1:
-        st.metric(
-            "B*",
-            f"${sv_B:,.0f}/wk",
-            help="**Optimal Weekly Budget.** The weekly incentive spend the optimizer recommends. "
-            "In Set APR mode, this is the minimum budget that maintains the target APR. "
-            "In Set Budget mode, this is the best allocation within your budget ceiling.",
-        )
-    with rc2:
-        st.metric(
-            "r_max*",
-            f"{sv_r:.2%}",
-            help="**Optimal Incentive Rate Cap.** The maximum annualized incentive rate. "
-            "When TVL < T_bind, the cap binds and depositors earn exactly r_max. "
-            "When TVL > T_bind, the rate floats below the cap (B/TVL × 52.14).",
-        )
-    with rc3:
-        st.metric(
-            "T_bind",
-            f"${sv_tb / 1e6:.1f}M",
-            help="**TVL Breakpoint.** The TVL level where incentive rate transitions from "
-            "capped (rate = r_max) to floating (rate = B/TVL × 52.14). "
-            "T_bind = B × 52.14 / r_max. Below T_bind: MAX-like. Above T_bind: Float-like.",
-        )
-    with rc4:
-        st.metric(
-            "Loss",
-            f"{sv_sr.optimal_loss:.3e}",
-            help="**Composite Loss Score.** The optimizer's objective function value — "
-            "lower is better. Combines spend efficiency, APR stability, TVL shortfall, "
-            "whale risk, floor breaches, and other penalty terms. Use to compare configs.",
-        )
-    with rc5:
-        st.metric(
-            "Whales",
-            f"{ir['n_whales']}",
-            help="**Whale Profiles Simulated.** Number of large depositor profiles included "
-            "in the Monte Carlo simulation. Each whale can enter/exit based on the "
-            "incentive rate vs their opportunity cost (r_threshold).",
-        )
-    with rc6:
-        st.metric(
-            "Time",
-            f"{ir['time']:.1f}s",
-            help="**Optimization Runtime.** Wall-clock time for the grid search + "
-            "Monte Carlo simulation. Scales with MC Paths × grid resolution.",
-        )
-
-    if mc:
-        rc7, rc8, rc9, rc10 = st.columns(4)
-        with rc7:
-            st.metric(
-                "Mean Total APR",
-                f"{mc.mean_apr:.2%}",
-                help="**Mean Total APR.** Average total APR (base + incentive) across all "
-                "MC paths and timesteps. This is what a typical depositor earns on average "
-                "over the campaign duration.",
-            )
-        with rc8:
-            st.metric(
-                "Mean Incentive APR",
-                f"{mc.mean_incentive_apr:.2%}",
-                help="**Mean Incentive APR.** Average incentive-only APR across all MC paths. "
-                "This is the incremental yield from your incentive spend, excluding the "
-                "venue's base APY.",
-            )
-        with rc9:
-            st.metric(
-                "APR Range (p5-p95)",
-                f"{mc.apr_p5:.1%} -- {mc.apr_p95:.1%}",
-                help="**APR Confidence Band.** The 5th–95th percentile of total APR across "
-                "MC paths. p5 = worst-case APR (only 5% of scenarios are worse). "
-                "p95 = best-case APR. Narrow range = stable rate, wide = volatile.",
-            )
-        with rc10:
-            st.metric(
-                "Budget Util",
-                f"{mc.mean_budget_util:.1%}",
-                help="**Budget Utilization.** Average fraction of the weekly budget actually "
-                "spent. <100% means the rate cap binds before the full budget is deployed "
-                "(MAX-like regime). 100% = all budget spent every week (Float regime).",
-            )
-
-    # Campaign type classification
+    # ── Compute campaign type + Merkl fields early (shown first) ──
     if sv_tb < sv_target_disp * 0.5:
         ctype = "Float-like"
         ctype_desc = "Cap rarely binds -- rate floats inversely with TVL"
@@ -2579,24 +2419,11 @@ def main():
     else:
         ctype = "Hybrid"
         ctype_desc = "Cap binds at low TVL, floats at high TVL"
-    st.info(
-        f"**Campaign Type: {ctype}** -- {ctype_desc}\n\n"
-        f"*Float:* Budget is fully spent every week, rate = B/TVL x 52.14. "
-        f"*MAX:* Rate cap (r_max) binds, spend < budget when TVL is below T_bind. "
-        f"*Hybrid:* Transitions between the two regimes depending on TVL."
-    )
-
-    # Actionable Merkl Campaign Instructions
-    st.subheader("Merkl Campaign Instructions")
-    st.caption(
-        "Copy these exact values into Merkl when setting up this campaign. "
-        "Campaign Type is derived from where T_bind sits relative to target TVL."
-    )
     merkl_type = "Hybrid" if ctype == "Hybrid" else ("MAX" if ctype == "MAX-like" else "Float")
     inc_at_target = apr_at_tvl(sv_B, sv_target_disp, sv_r)
     total_apr_at_target = sv_base_disp + inc_at_target
 
-    # Risk assessment (single venue)
+    # ── Risk data (needed by inline status inside the Merkl card) ──
     sv_risks = []
     sv_forced_info = ir.get("forced_rate_info")
     sv_ir_floor = ir.get("floor_apr", 0.0)
@@ -2645,18 +2472,14 @@ def main():
             f"mercenary capital. Consider a lower r_max to smooth the transition."
         )
 
-    if sv_risks:
-        st.markdown("### Risk Assessment")
-        with st.container(border=True):
-            for risk in sv_risks:
-                st.warning(risk)
-        st.markdown("---")
-
+    # ── Merkl Campaign Instructions (shown first, top of results) ──
+    st.subheader("Merkl Campaign Instructions")
+    st.caption(
+        "Copy these exact values into Merkl when setting up this campaign. "
+        "Campaign Type is derived from where T_bind sits relative to target TVL."
+    )
     with st.container(border=True):
-        if sv_risks:
-            st.markdown(f"**{sv_v['name']}** ({sv_v['asset']})")
-        else:
-            st.markdown(f"**{sv_v['name']}** ({sv_v['asset']})")
+        st.markdown(f"**{sv_v['name']}** ({sv_v['asset']})")
         m1, m2, m3 = st.columns(3)
         with m1:
             st.markdown(f"**Campaign Type:** `{merkl_type}`")
@@ -2680,24 +2503,25 @@ def main():
         # Inline status -- mode-aware
         if _result_mode == "set_apr":
             _derived_B_disp = ir.get("derived_budget")
-            _set_apr_disp = ir.get("set_apr_target", sv_ir_floor)
+            _set_apr_disp = ir.get("set_apr_target") or sv_ir_floor
+            _floor_inc_disp = ir.get("floor_inc_apr") or max(0, sv_ir_floor - sv_base_disp)
             if _derived_B_disp and _derived_B_disp > 0:
                 _sav = _derived_B_disp - sv_B
                 if _sav > 0:
                     st.success(
                         f"**Budget minimized:** ${sv_B:,.0f}/wk "
                         f"(${_sav:,.0f}/wk saved vs derived ${_derived_B_disp:,.0f}/wk). "
-                        f"Total APR target: {_set_apr_disp:.2%}."
+                        f"Target incentive APR: {_set_apr_disp:.2%} at target TVL."
                     )
                 else:
                     st.info(
-                        f"**Set APR result:** ${sv_B:,.0f}/wk needed to maintain "
-                        f"{_set_apr_disp:.2%} total APR. No cheaper config found."
+                        f"**Enforce APR result:** ${sv_B:,.0f}/wk needed to deliver "
+                        f"{_set_apr_disp:.2%} incentive APR. No cheaper config found."
                     )
             else:
                 st.info(
-                    f"**Set APR result:** ${sv_B:,.0f}/wk at r_max={sv_r:.2%} "
-                    f"to maintain {sv_ir_floor:.2%} total APR."
+                    f"**Enforce APR result:** ${sv_B:,.0f}/wk at r_max={sv_r:.2%} "
+                    f"targeting {_set_apr_disp:.2%} incentive APR (floor: {_floor_inc_disp:.2%})."
                 )
         elif sv_forced_info:
             if sv_forced_info.get("overspend"):
@@ -2715,13 +2539,13 @@ def main():
                 )
 
         if sv_ir_floor > 0 and total_apr_at_target < sv_ir_floor:
+            _floor_inc_sug = ir.get("floor_inc_apr") or max(0, sv_ir_floor - sv_base_disp)
             st.warning(
-                f"**Suggestion:** To maintain {sv_ir_floor:.2%} floor APR at target TVL "
-                f"(${sv_target_disp / 1e6:.0f}M), you need a minimum incentive rate of "
-                f"{max(0, sv_ir_floor - sv_base_disp):.2%}. "
-                f"This implies a forced rate of at least {max(0, sv_ir_floor - sv_base_disp):.2%} "
-                f"or a weekly budget of at least "
-                f"${sv_target_disp * max(0, sv_ir_floor - sv_base_disp) / WEEKS_PER_YEAR:,.0f}."
+                f"**Floor gap:** Incentive APR at target TVL ({inc_at_target:.2%}) is below "
+                f"the floor ({_floor_inc_sug:.2%}). "
+                f"Need a weekly budget of at least "
+                f"${sv_target_disp * _floor_inc_sug / WEEKS_PER_YEAR:,.0f} "
+                f"to deliver {_floor_inc_sug:.2%} incentive at ${sv_target_disp / 1e6:.0f}M TVL."
             )
 
         # Suggested TVL Cap Advisory
@@ -2821,6 +2645,209 @@ def main():
                         f"({_floor_inc:.2%}) at TVL = ${_floor_tvl / 1e6:.0f}M. "
                         f"Danger zone starts at ${_danger_tvl / 1e6:.0f}M (rate = {_rate_at_danger:.2%})."
                     )
+
+    # ── Risk Assessment ──
+    if sv_risks:
+        st.markdown("### Risk Assessment")
+        with st.container(border=True):
+            for risk in sv_risks:
+                st.warning(risk)
+        st.markdown("---")
+
+    # ── APR Constraint Status (Enforce APR mode) ──
+    if _result_mode == "set_apr" and mc:
+        _floor = ir.get("floor_apr", 0)
+        _derived_B = ir.get("derived_budget")
+
+        if _floor > 0:
+            # Strictness-based APR check:
+            # Static gate: can the budget physically deliver target incentive APR at target TVL?
+            # Dynamic gate: does mean_time_below_floor respect the strictness threshold?
+            _WEEKS_PER_YEAR_CHK = 365.0 / 7.0
+            _target_inc = ir.get("set_apr_target") or 0.0
+            _floor_inc = ir.get("floor_inc_apr") or 0.0
+            _strictness = ir.get("apr_sensitivity") or 0.9
+
+            _inc_at_tgt_static = min(sv_r, sv_B / max(sv_target_disp, 1.0) * _WEEKS_PER_YEAR_CHK)
+            _static_ok = (_target_inc <= 0) or (_inc_at_tgt_static >= _target_inc * 0.99)
+            _allowed_violation = 1.0 - _strictness
+            _dynamic_ok = mc.mean_time_below_floor <= _allowed_violation + 1e-6
+            _apr_ok = _static_ok and _dynamic_ok
+
+            if _derived_B and _derived_B > 0:
+                _savings = _derived_B - sv_B
+                _savings_pct = (_savings / _derived_B) * 100
+                if _savings > 0:
+                    st.success(
+                        f"**Budget optimized:** Optimizer found **${sv_B:,.0f}/wk** "
+                        f"(saved **${_savings:,.0f}/wk** = **{_savings_pct:.0f}%** vs "
+                        f"derived ceiling ${_derived_B:,.0f}/wk) "
+                        f"while delivering target incentive APR >= {_target_inc:.2%}."
+                    )
+                else:
+                    st.info(
+                        f"**Budget at ceiling:** Optimizer needs **${sv_B:,.0f}/wk** "
+                        f"(approx derived ${_derived_B:,.0f}/wk) to deliver {_target_inc:.2%} "
+                        f"incentive APR -- no cheaper feasible configuration found."
+                    )
+
+            if _apr_ok:
+                st.success(
+                    f"**APR constraint met:** Target {_target_inc:.2%} incentive APR is achievable "
+                    f"at target TVL (static: {_inc_at_tgt_static:.2%}). "
+                    f"Time below floor: {mc.mean_time_below_floor:.1%} "
+                    f"(allowed: {_allowed_violation:.1%})."
+                )
+            else:
+                _reason_parts = []
+                if not _static_ok:
+                    _reason_parts.append(
+                        f"budget cannot deliver {_target_inc:.2%} incentive at target TVL "
+                        f"(achieves {_inc_at_tgt_static:.2%})"
+                    )
+                if not _dynamic_ok:
+                    _reason_parts.append(
+                        f"floor breached {mc.mean_time_below_floor:.1%} of time "
+                        f"(strictness allows {_allowed_violation:.1%})"
+                    )
+                st.error(
+                    "**APR constraint not met:** " + "; ".join(_reason_parts) + ". "
+                    "Increase budget, reduce target TVL, or loosen strictness."
+                )
+
+            _headroom_abs = mc.apr_p5 - _floor
+            _headroom_mean = mc.mean_apr - _floor
+            _floor_breach_cost = mc.loss_components.get("floor_breach", 0.0)
+            _time_below = mc.mean_time_below_floor
+
+            if _headroom_abs >= _floor * 0.15:
+                _hr_label = "Large headroom"
+                _hr_advice = "Budget could potentially be lowered further."
+            elif _headroom_abs >= _floor * 0.03:
+                _hr_label = "Moderate headroom"
+                _hr_advice = "Some room to lower, but limited flexibility."
+            elif _headroom_abs >= 0:
+                _hr_label = "Tight -- at the edge"
+                _hr_advice = "No room to lower budget. Whale exits or TVL spikes may breach floor."
+            else:
+                _hr_label = "BREACHING"
+                _hr_advice = "APR drops below target in worst-case scenarios. Increase budget."
+
+            with st.container(border=True):
+                st.markdown(f"### APR Headroom: {_hr_label}")
+                hr1, hr2, hr3, hr4 = st.columns(4)
+                with hr1:
+                    st.metric(
+                        "p5 Headroom",
+                        f"{_headroom_abs:+.2%}",
+                        help="APR p5 minus floor — worst-case headroom across MC paths.",
+                    )
+                with hr2:
+                    st.metric(
+                        "Mean Headroom",
+                        f"{_headroom_mean:+.2%}",
+                        help="Mean APR minus floor — average headroom.",
+                    )
+                with hr3:
+                    st.metric(
+                        "Time Below Floor",
+                        f"{_time_below:.1%}",
+                        help="Average fraction of simulation time where APR drops below target.",
+                    )
+                with hr4:
+                    st.metric(
+                        "Floor Breach Cost",
+                        f"{_floor_breach_cost:.2e}",
+                        help="Loss component from APR floor breaches (lower = better).",
+                    )
+                st.caption(f"{_hr_advice}")
+
+    # ── Key Metrics ──
+    rc1, rc2, rc3, rc4, rc5, rc6 = st.columns(6)
+    with rc1:
+        st.metric(
+            "B*",
+            f"${sv_B:,.0f}/wk",
+            help="**Optimal Weekly Budget.** The weekly incentive spend the optimizer recommends. "
+            "In Enforce APR mode, this is the minimum budget that delivers the target incentive APR. "
+            "In Enforce Budget mode, this is the best allocation within your budget ceiling.",
+        )
+    with rc2:
+        st.metric(
+            "r_max*",
+            f"{sv_r:.2%}",
+            help="**Optimal Incentive Rate Cap.** The maximum annualized incentive rate. "
+            "When TVL < T_bind, the cap binds and depositors earn exactly r_max. "
+            "When TVL > T_bind, the rate floats below the cap (B/TVL × 52.14).",
+        )
+    with rc3:
+        st.metric(
+            "T_bind",
+            f"${sv_tb / 1e6:.1f}M",
+            help="**TVL Breakpoint.** The TVL level where incentive rate transitions from "
+            "capped (rate = r_max) to floating (rate = B/TVL × 52.14). "
+            "T_bind = B × 52.14 / r_max. Below T_bind: MAX-like. Above T_bind: Float-like.",
+        )
+    with rc4:
+        st.metric(
+            "Loss",
+            f"{sv_sr.optimal_loss:.3e}",
+            help="**Composite Loss Score.** The optimizer's objective function value — "
+            "lower is better. Combines spend efficiency, APR stability, TVL shortfall, "
+            "whale risk, floor breaches, and other penalty terms. Use to compare configs.",
+        )
+    with rc5:
+        st.metric(
+            "Whales",
+            f"{ir['n_whales']}",
+            help="**Whale Profiles Simulated.** Number of large depositor profiles included "
+            "in the Monte Carlo simulation. Each whale can enter/exit based on the "
+            "incentive rate vs their opportunity cost (r_threshold).",
+        )
+    with rc6:
+        st.metric(
+            "Time",
+            f"{ir['time']:.1f}s",
+            help="**Optimization Runtime.** Wall-clock time for the grid search + "
+            "Monte Carlo simulation. Scales with MC Paths × grid resolution.",
+        )
+
+    if mc:
+        rc7, rc8, rc9, rc10 = st.columns(4)
+        with rc7:
+            st.metric(
+                "Mean Total APR",
+                f"{mc.mean_apr:.2%}",
+                help="**Mean Total APR.** Average total APR (base + incentive) across all "
+                "MC paths and timesteps. This is what a typical depositor earns on average "
+                "over the campaign duration.",
+            )
+        with rc8:
+            st.metric(
+                "Mean Incentive APR",
+                f"{mc.mean_incentive_apr:.2%}",
+                help="**Mean Incentive APR.** Average incentive-only APR across all MC paths. "
+                "This is the incremental yield from your incentive spend, excluding the "
+                "venue's base APY.",
+            )
+        with rc9:
+            st.metric(
+                "APR Range (p5-p95)",
+                f"{mc.apr_p5:.1%} -- {mc.apr_p95:.1%}",
+                help="**APR Confidence Band.** The 5th–95th percentile of total APR across "
+                "MC paths. p5 = worst-case APR (only 5% of scenarios are worse). "
+                "p95 = best-case APR. Narrow range = stable rate, wide = volatile.",
+            )
+        with rc10:
+            st.metric(
+                "Budget Util",
+                f"{mc.mean_budget_util:.1%}",
+                help="**Budget Utilization.** Average fraction of the weekly budget actually "
+                "spent. <100% means the rate cap binds before the full budget is deployed "
+                "(MAX-like regime). 100% = all budget spent every week (Float regime).",
+            )
+
+    st.info(f"**Campaign Type: {ctype}** -- {ctype_desc}")
 
     # APR at key TVL levels
     st.subheader("Incentive APR at Key TVL Levels")

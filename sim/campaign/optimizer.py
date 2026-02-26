@@ -57,6 +57,12 @@ class SurfaceGrid:
     base_apy: float = 0.0  # Venue's organic yield (passed to CampaignConfig)
     supply_cap: float = 0.0  # USD (0 = unlimited) — passed through to CampaignConfig
 
+    # Hard feasibility gate fields (Enforce APR mode)
+    # These reject (B, r_max) cells that cannot physically deliver the target
+    # incentive APR at the target TVL, regardless of MC simulation outcome.
+    target_inc_apr: float = 0.0  # Required incentive APR at target TVL (decimal)
+    target_tvl_for_feasibility: float = 0.0  # TVL used for the static gate (USD)
+
     @classmethod
     def from_ranges(
         cls,
@@ -481,6 +487,35 @@ def optimize_surface(
             loss_surface[i, j] = mc.mean_loss
             loss_std_surface[i, j] = mc.std_loss
             feasibility_mask[i, j] = mc.is_feasible
+
+            # Hard floor-strictness feasibility gate:
+            # Reject cells where the APR drops below the floor more often than
+            # (1 - strictness) of the time across Monte Carlo paths.
+            if (
+                feasibility_mask[i, j]
+                and weights.apr_floor > 0
+                and weights.apr_floor_sensitivity > 0
+            ):
+                allowed_violation_rate = 1.0 - weights.apr_floor_sensitivity
+                if mc.mean_time_below_floor > allowed_violation_rate + 1e-6:
+                    feasibility_mask[i, j] = False
+
+            # Hard static target-incentive gate:
+            # Reject cells where the weekly budget cannot physically deliver
+            # the target incentive APR at the target TVL (B / TVL * 52.14 < target).
+            # This catches under-budgeted cells that MC passed by luck.
+            if (
+                feasibility_mask[i, j]
+                and grid.target_inc_apr > 0
+                and grid.target_tvl_for_feasibility > 0
+            ):
+                _WEEKS_PER_YEAR = 365.0 / 7.0
+                _inc_at_tgt = min(
+                    r_max,
+                    B / grid.target_tvl_for_feasibility * _WEEKS_PER_YEAR,
+                )
+                if _inc_at_tgt < grid.target_inc_apr * 0.99:
+                    feasibility_mask[i, j] = False
 
             for k in component_keys:
                 component_surfaces[k][i, j] = mc.loss_components.get(k, np.inf)
