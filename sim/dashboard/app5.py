@@ -561,6 +561,13 @@ PROGRAMS = {
                 "current_tvl": 195_000_000,
                 "target_tvl": 100_000_000,
                 "target_util": 0.60,
+                # Morpho has no vault-level hard cap.  The cap returned by
+                # fetch_morpho_vault_snapshot is the SUM of per-market sleeve caps
+                # (allocation upper bounds).  Deposits above this total sit idle
+                # and dilute yield, but are NOT rejected by the contract.
+                # cap_is_hard=False means: show the sleeve sum for reference but
+                # do NOT use it as a hard TVL wall in the simulation.
+                "cap_is_hard": False,
             },
             {
                 "name": "Curve PYUSD-USDC",
@@ -708,9 +715,18 @@ def run_venue_optimization(
     apy_sensitive_config: APYSensitiveConfig | None = None,
     r_max_range: tuple[float, float] = (0.02, 0.15),
     supply_cap: float = 0.0,
+    cap_is_hard: bool = True,
     target_inc_apr: float = 0.0,
 ) -> SurfaceResult:
-    """Run full MC surface optimization for one venue."""
+    """
+    Run full MC surface optimization for one venue.
+
+    cap_is_hard controls whether supply_cap is enforced as a hard TVL wall in
+    the simulation and whether the cap-proximity r_max taper is applied:
+      True  — hard on-chain cap (Aave, Euler): hard wall + taper active.
+      False — soft sleeve-sum cap (Morpho): cap shown for reference only;
+              simulation does not enforce a TVL ceiling and taper is skipped.
+    """
     WEEKS_PER_YEAR = 365.0 / 7.0  # 52.14
 
     # Forced rate mode
@@ -773,10 +789,14 @@ def run_venue_optimization(
         r_lo, r_hi = r_lo_eff, r_hi_eff
         r_steps = GRID_R_STEPS
 
-    # Cap-proximity taper: if target TVL is near the supply cap, clip r_max_max
-    # to the highest useful APR ceiling (budget spread over the cap + 5 % buffer).
+    # Cap-proximity taper: clips r_max grid ceiling when target TVL is close to a
+    # HARD supply cap (budget spread over the cap + 5% buffer would be wasted above cap).
+    # Skipped for soft sleeve-sum caps (Morpho) — deposits above the sleeve sum sit idle
+    # and dilute yield, but there is no hard wall so the full r_max range remains relevant.
+    # supply_cap_sim = 0 (unlimited) for soft caps so no hard wall is enforced in simulation.
+    supply_cap_sim = supply_cap if cap_is_hard else 0.0
     _cap_taper_info: str | None = None
-    if pinned_r_max is None:
+    if pinned_r_max is None and cap_is_hard:
         r_hi, _taper_applied = apply_cap_proximity_taper(
             r_max_max=r_hi,
             b_max=b_max,
@@ -806,7 +826,7 @@ def run_venue_optimization(
         dt_days=DT_DAYS,
         horizon_days=HORIZON_DAYS,
         base_apy=base_apy,
-        supply_cap=supply_cap,
+        supply_cap=supply_cap_sim,  # 0 for soft-cap venues (Morpho)
         target_inc_apr=target_inc_apr,
         target_tvl_for_feasibility=target_tvl if target_inc_apr > 0 else 0.0,
     )
@@ -1581,20 +1601,35 @@ def main():
         )
 
     # Supply Cap -- show live cap, optional override for planned raises
-    _sv_live_cap_label = (
-        f"${_sv_default_supply_cap / 1e6:.0f}M"
-        if _sv_default_supply_cap > 0
-        else "No cap (unlimited)"
-    )
-    sv_cap_override = st.toggle(
-        f"Override supply cap for this campaign  —  current on-chain cap: **{_sv_live_cap_label}**",
-        value=False,
-        key=_svk + "cap_override",
-        help=(
+    _sv_cap_is_hard = sv_venue.get("cap_is_hard", True)
+    if _sv_default_supply_cap > 0:
+        if _sv_cap_is_hard:
+            _sv_live_cap_label = f"${_sv_default_supply_cap / 1e6:.0f}M (on-chain hard cap)"
+        else:
+            _sv_live_cap_label = f"~${_sv_default_supply_cap / 1e6:.0f}M (sleeve cap sum — soft)"
+    else:
+        _sv_live_cap_label = "No cap (unlimited)"
+    if _sv_cap_is_hard:
+        _sv_cap_toggle_label = f"Override supply cap  —  current: **{_sv_live_cap_label}**"
+        _sv_cap_toggle_help = (
             "Enable this when you plan to **raise the supply cap before launching this campaign**. "
             "The optimizer will simulate TVL growth up to the new cap, not the current on-chain one. "
-            "Leave off to use the live on-chain cap as the ceiling."
-        ),
+            "Leave off to use the live on-chain cap as the hard ceiling."
+        )
+    else:
+        _sv_cap_toggle_label = f"Override sleeve cap reference  —  current: **{_sv_live_cap_label}**"
+        _sv_cap_toggle_help = (
+            "This venue has **no contract-level hard cap** — the figure above is the sum of "
+            "per-market sleeve caps (allocation ceilings). Deposits above this total sit idle "
+            "and dilute yield but are **not rejected**. The simulation does not enforce this as "
+            "a hard TVL wall.\n\nEnable this if you plan to raise individual sleeve caps and "
+            "want to model a higher allocation ceiling for reference."
+        )
+    sv_cap_override = st.toggle(
+        _sv_cap_toggle_label,
+        value=False,
+        key=_svk + "cap_override",
+        help=_sv_cap_toggle_help,
     )
     if sv_cap_override:
         sv_supply_cap = (
@@ -2395,6 +2430,7 @@ def main():
                 apy_sensitive_config=sv_apy_sensitive,
                 r_max_range=(_sv_r_lo_inc, _sv_r_hi_inc),
                 supply_cap=sv_supply_cap,
+                cap_is_hard=sv_venue.get("cap_is_hard", True),
                 target_inc_apr=sv_target_inc_apr if _is_set_apr_mode else 0.0,
             )
             sv_elapsed = time.time() - t0
