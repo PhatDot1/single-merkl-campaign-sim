@@ -440,6 +440,9 @@ PROGRAMS = {
                 "current_tvl": 190_000_000,
                 "target_tvl": 190_000_000,
                 "target_util": 0.385,
+                # Euler Sentora caps() returns 0 (no on-chain hard cap enforced by vault).
+                # This is the protocol-governance supply cap visible in the Euler UI.
+                "supply_cap": 190_000_000,
             },
             {
                 "name": "Curve RLUSD-USDC",
@@ -1409,7 +1412,10 @@ def main():
                 _af_existing[sv_venue["name"]] = {
                     "current_tvl": _af_tvl,
                     "current_util": _af_util,
-                    "supply_cap": _af_supply_cap,
+                    # Prefer live-fetched cap; fall back to venue config cap when live returns 0.
+                    # Euler Sentora vaults have no on-chain hard cap (caps() returns 0) but may
+                    # have a protocol-governance cap stored in the venue config dict.
+                    "supply_cap": _af_supply_cap if _af_supply_cap > 0 else sv_venue.get("supply_cap", 0.0),
                 }
                 st.session_state[_af_cache_key] = _af_existing
 
@@ -1469,8 +1475,10 @@ def main():
     _sv_base_preview_key = f"sv_base_apy_{sv_venue['name']}"
     _sv_base_preview = st.session_state.get(_sv_base_preview_key, 0.0)
 
-    # Supply cap: prefer live-fetched value from session cache; fall back to static venue definition
-    _sv_default_supply_cap = _sv_cached.get("supply_cap", sv_venue.get("supply_cap", 0.0))
+    # Supply cap: prefer live-fetched value from session cache; fall back to static venue definition.
+    # Use `or` instead of dict default so a cached 0.0 falls through to the venue config value
+    # (e.g. Euler Sentora where caps() returns 0 on-chain but the venue config has a known cap).
+    _sv_default_supply_cap = _sv_cached.get("supply_cap") or sv_venue.get("supply_cap", 0.0)
 
     # Show auto-fill summary
     _sv_rthresh_key_af = f"sv_rthresh_{sv_venue['asset']}"
@@ -1478,11 +1486,14 @@ def main():
     _sv_rthresh_val_af = _sv_rthresh_data_af.get("r_threshold", 0.045)
     _sv_base_source_af = st.session_state.get(f"{_sv_base_preview_key}_source", "not fetched")
     if _sv_cached or _sv_base_preview > 0:
-        _sv_cap_display = (
-            f"${_sv_default_supply_cap / 1e6:.0f}M"
-            if _sv_default_supply_cap > 0
-            else "No cap"
-        )
+        _sv_protocol = sv_venue.get("protocol", "")
+        if _sv_default_supply_cap > 0 and _sv_protocol == "morpho":
+            # Morpho cap = sum of per-market sleeve caps (allocation upper bound, not vault hard cap)
+            _sv_cap_display = f"~${_sv_default_supply_cap / 1e6:.0f}M (sum of sleeve caps)"
+        elif _sv_default_supply_cap > 0:
+            _sv_cap_display = f"${_sv_default_supply_cap / 1e6:.0f}M"
+        else:
+            _sv_cap_display = "No cap"
         st.success(
             f"Auto-filled from live data -- "
             f"TVL: ${_sv_default_current_tvl:.1f}M, "
