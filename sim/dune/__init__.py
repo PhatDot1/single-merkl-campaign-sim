@@ -17,13 +17,28 @@ from .queries import (
     MERCENARY_DETECTION_QUERY as MERCENARY_DETECTION_QUERY,
 )
 from .queries import (
+    TVL_DAILY_SUMMARY_QUERY as TVL_DAILY_SUMMARY_QUERY,
+)
+from .queries import (
     WHALE_FLOWS_QUERY as WHALE_FLOWS_QUERY,
 )
 from .sync import (
     DuneSyncResult as DuneSyncResult,
 )
 from .sync import (
+    TVLStickinessModel as TVLStickinessModel,
+)
+from .sync import (
+    build_stickiness_enrichment as build_stickiness_enrichment,
+)
+from .sync import (
     build_whale_history_lookup as build_whale_history_lookup,
+)
+from .sync import (
+    compute_tvl_stickiness as compute_tvl_stickiness,
+)
+from .sync import (
+    compute_whale_stickiness_score as compute_whale_stickiness_score,
 )
 from .sync import (
     derive_mercenary_thresholds as derive_mercenary_thresholds,
@@ -33,6 +48,9 @@ from .sync import (
 )
 from .sync import (
     load_whale_flows as load_whale_flows,
+)
+from .sync import (
+    stickiness_to_profile_params as stickiness_to_profile_params,
 )
 from .sync import (
     sync_all_venues as sync_all_venues,

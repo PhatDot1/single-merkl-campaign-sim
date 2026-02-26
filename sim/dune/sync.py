@@ -629,3 +629,259 @@ def build_whale_history_lookup(pool_id: str) -> dict | None:
         }
 
     return result if result else None
+
+
+# ============================================================================
+# WHALE STICKINESS SCORING
+# ============================================================================
+
+
+def compute_whale_stickiness_score(
+    whale_history_entry: dict,
+    exits_during_rate_drops: int = 0,
+) -> float:
+    """
+    Compute a behavioural stickiness score ∈ [0.1, 1.0] for a single whale.
+
+    Higher score = more sticky (slow to exit, loyal depositor).
+    Lower score  = mercenary (quick to exit, rate-sensitive).
+
+    Formula:
+        base        = 1.0 - n_withdrawals / max(n_deposits, 1)
+        hold_bonus  = min(avg_hold_days / 90, 0.30)    # capped at 0.30
+        exit_penalty = exits_during_rate_drops × 0.15
+        score       = clamp(base + hold_bonus - exit_penalty, 0.1, 1.0)
+
+    Args:
+        whale_history_entry: Single dict from build_whale_history_lookup():
+            {"n_deposits": int, "n_withdrawals": int, "avg_hold_days": float, ...}
+        exits_during_rate_drops: Number of times this whale exited during
+            a known APR decline event (0 if not tracked).
+
+    Returns:
+        Stickiness score in [0.1, 1.0].
+    """
+    n_deps = max(int(whale_history_entry.get("n_deposits", 0)), 0)
+    n_wds = max(int(whale_history_entry.get("n_withdrawals", 0)), 0)
+    avg_hold = max(float(whale_history_entry.get("avg_hold_days", 30.0)), 0.0)
+
+    base = 1.0 - n_wds / max(n_deps, 1)
+    hold_bonus = min(avg_hold / 90.0, 0.30)
+    exit_penalty = max(exits_during_rate_drops, 0) * 0.15
+
+    raw = base + hold_bonus - exit_penalty
+    return max(0.10, min(1.0, raw))
+
+
+def stickiness_to_profile_params(score: float) -> dict:
+    """
+    Map a stickiness score to WhaleProfile behavioural parameters.
+
+    Linear interpolation across three score bands:
+    - Low   [0.10, 0.40): fast exit, narrow hysteresis — mercenary-like
+    - Mid   [0.40, 0.70): moderate stickiness
+    - High  [0.70, 1.00]: slow exit, wide hysteresis — institutional/sticky
+
+    Returns dict with keys:
+        exit_delay_days     — reaction time before exiting
+        reentry_delay_days  — time required before re-entering
+        hysteresis_band     — APR gap above exit_threshold to force re-entry
+
+    The caller should update a WhaleProfile with these values.
+    """
+    s = max(0.10, min(1.0, float(score)))
+
+    # Anchor points: (score, exit_delay, reentry_delay, hysteresis)
+    # Low: score=0.10
+    # High: score=1.00
+    LOW_SCORE, HIGH_SCORE = 0.10, 1.00
+    LOW_EXIT, HIGH_EXIT = 1.0, 14.0          # days
+    LOW_REENTRY, HIGH_REENTRY = 3.0, 21.0   # days
+    LOW_HYST, HIGH_HYST = 0.002, 0.012      # APR decimal
+
+    frac = (s - LOW_SCORE) / (HIGH_SCORE - LOW_SCORE)
+    exit_delay = LOW_EXIT + frac * (HIGH_EXIT - LOW_EXIT)
+    reentry_delay = LOW_REENTRY + frac * (HIGH_REENTRY - LOW_REENTRY)
+    hysteresis = LOW_HYST + frac * (HIGH_HYST - LOW_HYST)
+
+    return {
+        "exit_delay_days": round(exit_delay, 2),
+        "reentry_delay_days": round(reentry_delay, 2),
+        "hysteresis_band": round(hysteresis, 5),
+    }
+
+
+def build_stickiness_enrichment(pool_id: str) -> dict[str, dict] | None:
+    """
+    Build per-address stickiness parameter dicts from cached whale flow data.
+
+    Combines build_whale_history_lookup() + compute_whale_stickiness_score()
+    + stickiness_to_profile_params() into a single convenience function.
+
+    Returns:
+        {address_lower: {"score": float, "exit_delay_days": float,
+                          "reentry_delay_days": float, "hysteresis_band": float}}
+        or None if no cached Dune data is available.
+    """
+    history = build_whale_history_lookup(pool_id)
+    if not history:
+        return None
+
+    enrichment: dict[str, dict] = {}
+    for addr, hist in history.items():
+        score = compute_whale_stickiness_score(hist)
+        params = stickiness_to_profile_params(score)
+        enrichment[addr] = {"score": score, **params}
+
+    return enrichment if enrichment else None
+
+
+# ============================================================================
+# TVL STICKINESS MODEL
+# ============================================================================
+
+
+@dataclass
+class TVLStickinessModel:
+    """
+    Empirical TVL stickiness model derived from historical deposit/withdrawal data.
+
+    Used to set organic-TVL floor and calibrate RetailDepositorConfig parameters.
+
+    Attributes:
+        venue:                       Pool / venue name.
+        organic_tvl_estimate_usd:    Average TVL during incentive-free windows (USD).
+                                     If no such windows exist, estimated conservatively
+                                     as sticky_fraction × peak_tvl.
+        incentive_elasticity:        Sensitivity of TVL to incentive rate changes
+                                     (dTVL/dRate ÷ TVL, dimensionless fraction).
+                                     0 = no response, 1 = perfectly elastic.
+        mean_exit_lag_days:          Average days between incentive drop and TVL exit.
+        tvl_half_life_post_incentive_days:
+                                     Time for incentive TVL to halve after incentives end.
+        sticky_fraction:             Fraction of incentive TVL that persists long-term.
+        n_observations:              Number of daily snapshots used for estimation.
+    """
+
+    venue: str
+    organic_tvl_estimate_usd: float = 0.0
+    incentive_elasticity: float = 0.5          # 0 = sticky, 1 = fully elastic
+    mean_exit_lag_days: float = 7.0
+    tvl_half_life_post_incentive_days: float = 14.0
+    sticky_fraction: float = 0.40
+    n_observations: int = 0
+
+
+def compute_tvl_stickiness(
+    tvl_snapshots: list[dict],
+    venue: str = "unknown",
+    incentive_rate_key: str = "incentive_rate",
+    tvl_key: str = "tvl_usd",
+    date_key: str = "date",
+    zero_incentive_threshold: float = 0.001,
+) -> TVLStickinessModel:
+    """
+    Estimate TVL stickiness from a historical time series.
+
+    Expects a list of daily records:
+        [{"date": "2024-01-01", "tvl_usd": 10_000_000, "incentive_rate": 0.04}, ...]
+
+    Algorithm:
+    1. Separate periods with zero incentives vs incentivized periods.
+    2. Organic TVL estimate = mean TVL in zero-incentive windows.
+       If no zero-incentive windows exist, use min TVL as a conservative floor.
+    3. Incentive elasticity = stddev(TVL) / mean(TVL) during incentivized windows
+       (a rough proxy for rate-driven volatility).
+    4. sticky_fraction = organic_tvl / mean_incentivized_tvl (clamped to [0.05, 0.95]).
+    5. Exit lag = day of first TVL drop > 5 % after an incentive cutoff event.
+       Averaged across all such events.
+    6. Half-life = estimated from the decay speed after incentive cutoffs.
+
+    Returns:
+        TVLStickinessModel populated with estimates (or conservative defaults if
+        insufficient data).
+    """
+    if not tvl_snapshots:
+        return TVLStickinessModel(venue=venue)
+
+    # Sort by date
+    try:
+        records = sorted(tvl_snapshots, key=lambda r: r.get(date_key, ""))
+    except Exception:
+        records = list(tvl_snapshots)
+
+    tvls = [max(float(r.get(tvl_key, 0)), 0.0) for r in records]
+    rates = [max(float(r.get(incentive_rate_key, 0)), 0.0) for r in records]
+    n = len(records)
+
+    if n == 0:
+        return TVLStickinessModel(venue=venue)
+
+    # --- Organic TVL (zero-incentive windows) ---
+    organic_tvls = [tvls[i] for i in range(n) if rates[i] <= zero_incentive_threshold]
+    mean_inc_tvl_all = sum(tvls) / n if n else 0.0
+
+    if organic_tvls:
+        organic_tvl = sum(organic_tvls) / len(organic_tvls)
+    else:
+        # No zero-incentive data; use min TVL as conservative floor
+        organic_tvl = min(tvls) if tvls else 0.0
+
+    # --- Incentive-period TVL stats (for elasticity) ---
+    inc_tvls = [tvls[i] for i in range(n) if rates[i] > zero_incentive_threshold]
+    if len(inc_tvls) >= 2:
+        mean_inc = sum(inc_tvls) / len(inc_tvls)
+        if mean_inc > 0:
+            variance = sum((t - mean_inc) ** 2 for t in inc_tvls) / len(inc_tvls)
+            std_inc = variance**0.5
+            elasticity = min(std_inc / mean_inc, 1.0)
+        else:
+            elasticity = 0.5
+    else:
+        elasticity = 0.5
+
+    # --- sticky_fraction ---
+    mean_all_tvl = mean_inc_tvl_all if mean_inc_tvl_all > 0 else (organic_tvl or 1.0)
+    sticky_fraction = max(0.05, min(0.95, organic_tvl / mean_all_tvl))
+
+    # --- Exit lag + half-life: detect incentive cutoff events ---
+    exit_lags: list[float] = []
+    half_lives: list[float] = []
+
+    for i in range(1, n - 1):
+        prev_rate = rates[i - 1]
+        curr_rate = rates[i]
+        # Incentive cutoff: rate drops from > threshold to <= threshold
+        if prev_rate > zero_incentive_threshold and curr_rate <= zero_incentive_threshold:
+            tvl_at_cutoff = tvls[i]
+            if tvl_at_cutoff <= 0:
+                continue
+            # Find first subsequent day with >5% TVL drop
+            for j in range(i + 1, min(i + 30, n)):
+                drop = (tvl_at_cutoff - tvls[j]) / tvl_at_cutoff
+                if drop > 0.05:
+                    exit_lags.append(float(j - i))
+                    break
+            # Estimate half-life: days until TVL is 50% of cutoff value
+            half_tvl = tvl_at_cutoff * 0.5
+            for j in range(i + 1, n):
+                if tvls[j] <= half_tvl:
+                    half_lives.append(float(j - i))
+                    break
+
+    mean_exit_lag = sum(exit_lags) / len(exit_lags) if exit_lags else 7.0
+    mean_half_life = sum(half_lives) / len(half_lives) if half_lives else 14.0
+
+    # Clamp to reasonable ranges
+    mean_exit_lag = max(1.0, min(mean_exit_lag, 60.0))
+    mean_half_life = max(2.0, min(mean_half_life, 90.0))
+
+    return TVLStickinessModel(
+        venue=venue,
+        organic_tvl_estimate_usd=organic_tvl,
+        incentive_elasticity=round(elasticity, 4),
+        mean_exit_lag_days=round(mean_exit_lag, 2),
+        tvl_half_life_post_incentive_days=round(mean_half_life, 2),
+        sticky_fraction=round(sticky_fraction, 4),
+        n_observations=n,
+    )

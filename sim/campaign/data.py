@@ -41,6 +41,29 @@ except ImportError:
     def get_all_venue_addresses(asset: str) -> set[str]:  # type: ignore[misc]
         return set()
 
+try:
+    from dune.sync import (
+        build_stickiness_enrichment,
+    )
+    from dune.sync import (
+        stickiness_to_profile_params as _stickiness_to_profile_params,
+    )
+except ImportError:
+    try:
+        from ..dune.sync import (  # type: ignore[no-redef]
+            build_stickiness_enrichment,  # type: ignore[no-redef]
+        )
+        from ..dune.sync import (
+            stickiness_to_profile_params as _stickiness_to_profile_params,  # type: ignore[no-redef]
+        )
+    except ImportError:
+
+        def build_stickiness_enrichment(pool_id: str) -> dict | None:  # type: ignore[misc]
+            return None
+
+        def _stickiness_to_profile_params(score: float) -> dict:  # type: ignore[misc]
+            return {"exit_delay_days": 2.0, "reentry_delay_days": 7.0, "hysteresis_band": 0.005}
+
 # ============================================================================
 # CONSTANTS
 # ============================================================================
@@ -2133,3 +2156,83 @@ def fetch_and_calibrate(
     print("Calibration complete.")
 
     return params
+
+
+# ============================================================================
+# WHALE PROFILE STICKINESS ENRICHMENT
+# ============================================================================
+
+
+def enrich_whale_profiles_from_stickiness(
+    whale_profiles: list[WhaleProfile],
+    pool_id: str,
+    *,
+    fallback_score: float = 0.5,
+    verbose: bool = False,
+) -> list[WhaleProfile]:
+    """
+    Replace synthetic WhaleProfile behavioural parameters with empirical ones
+    derived from Dune Analytics whale-flow history.
+
+    For each profile whose `whale_id` matches a Dune address (case-insensitive),
+    the `exit_delay_days`, `reentry_delay_days`, and `hysteresis_band` are
+    updated using scores from build_stickiness_enrichment().
+
+    Profiles with no matching Dune history receive parameters derived from
+    `fallback_score` (default 0.5 = medium stickiness).
+
+    Args:
+        whale_profiles:  List of WhaleProfile objects to enrich (mutated in place
+                         returning a new list — originals are *not* modified).
+        pool_id:         Venue pool ID used to look up cached Dune CSV data.
+        fallback_score:  Stickiness score used for whales with no history (0.1–1.0).
+        verbose:         Print enrichment stats.
+
+    Returns:
+        New list of WhaleProfile objects with updated behavioural parameters.
+        Profiles without Dune data fall back to `fallback_score` params.
+        Returns the original list unchanged if no Dune data is available at all.
+    """
+    import dataclasses
+
+    enrichment = build_stickiness_enrichment(pool_id)
+    fallback_params = _stickiness_to_profile_params(fallback_score)
+
+    if enrichment is None:
+        if verbose:
+            print(
+                f"  [enrich_whale_profiles] No Dune cache for {pool_id}; "
+                f"applying fallback score={fallback_score:.2f} to all whales"
+            )
+        # Apply fallback to all profiles
+        enrichment = {}
+
+    enriched: list[WhaleProfile] = []
+    n_matched = 0
+    n_fallback = 0
+
+    for wp in whale_profiles:
+        # Normalise ID for lookup (Dune addresses are lowercase)
+        lookup_key = wp.whale_id.lower()
+        params = enrichment.get(lookup_key)
+
+        if params is not None:
+            n_matched += 1
+            eparams = {
+                "exit_delay_days": params["exit_delay_days"],
+                "reentry_delay_days": params["reentry_delay_days"],
+                "hysteresis_band": params["hysteresis_band"],
+            }
+        else:
+            n_fallback += 1
+            eparams = fallback_params
+        enriched.append(dataclasses.replace(wp, **eparams))
+
+    if verbose:
+        print(
+            f"  [enrich_whale_profiles] {pool_id}: "
+            f"{n_matched} matched from Dune history, {n_fallback} used fallback "
+            f"(score={fallback_score:.2f})"
+        )
+
+    return enriched

@@ -160,3 +160,60 @@ def render_query(template: str, **params) -> str:
     for key, value in params.items():
         sql = sql.replace(f"{{{{{key}}}}}", str(value))
     return sql
+
+
+# ============================================================================
+# TVL DAILY SUMMARY: Net TVL estimation from mint/burn events
+# ============================================================================
+# Aggregates daily deposit (mint) and withdrawal (burn) amounts to produce
+# a running TVL estimate. Combined with known incentive rates this feeds
+# compute_tvl_stickiness() in dune/sync.py.
+
+TVL_DAILY_SUMMARY_QUERY = """
+-- Daily net TVL flows from share-token mint/burn events
+-- Mints (from 0x0) = deposits; Burns (to 0x0) = withdrawals
+WITH daily_flows AS (
+    SELECT
+        DATE_TRUNC('day', block_time) AS date,
+        SUM(
+            CASE
+                WHEN "from" = 0x0000000000000000000000000000000000000000
+                THEN CAST(value AS DOUBLE) / POWER(10, {{decimals}})
+                ELSE 0
+            END
+        ) AS daily_deposits,
+        SUM(
+            CASE
+                WHEN "to" = 0x0000000000000000000000000000000000000000
+                THEN CAST(value AS DOUBLE) / POWER(10, {{decimals}})
+                ELSE 0
+            END
+        ) AS daily_withdrawals
+    FROM {{chain}}.erc20_{{chain}}.evt_Transfer
+    WHERE contract_address = LOWER('{{token_address}}')
+      AND block_time >= NOW() - INTERVAL '{{days}}' DAY
+      AND (
+          "from" = 0x0000000000000000000000000000000000000000
+          OR "to" = 0x0000000000000000000000000000000000000000
+      )
+    GROUP BY 1
+),
+running AS (
+    SELECT
+        date,
+        daily_deposits,
+        daily_withdrawals,
+        daily_deposits - daily_withdrawals AS net_flow,
+        SUM(daily_deposits - daily_withdrawals)
+            OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_tvl
+    FROM daily_flows
+)
+SELECT
+    date,
+    daily_deposits,
+    daily_withdrawals,
+    net_flow,
+    cumulative_tvl
+FROM running
+ORDER BY date ASC
+"""
