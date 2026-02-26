@@ -1,0 +1,174 @@
+{
+  "total_weekly_budget": 1300000,
+  "venues": [
+    {
+      "name": "Morpho PYUSD",
+      "asset_symbol": "PYUSD",
+      "protocol": "morpho",
+      "current_tvl": 195000000,
+      "current_utilization": 0.438,
+      "target_tvl": 100000000,
+      "target_utilization": 0.90,
+      "target_incentive_rate": 0.06,
+      "base_apy": 0.0115,
+      "budget_min": 50000,
+      "budget_max": 300000,
+      "r_max_min": 0.04,
+      "r_max_max": 0.12,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "r_threshold": 0.045,
+      "competitor_rates": {
+        "aave_pyusd_core": 0.0332,
+        "euler_sentora_pyusd": 0.065,
+        "kamino_earn": 0.0406,
+        "curve_pyusd_usdc": 0.0668
+      },
+      "weights": {
+        "w_spend": 1.0,
+        "w_spend_waste_penalty": 2.0,
+        "w_apr_variance": 500000,
+        "w_apr_ceiling": 100000000,
+        "w_tvl_shortfall": 5e-7,
+        "apr_target": 0.055,
+        "apr_ceiling": 0.10,
+        "tvl_target": 100000000,
+        "apr_stability_on_total": true
+      },
+      "whale_profiles": [
+        {
+          "whale_id": "morpho_whale_1",
+          "position_usd": 29600000,
+          "alt_rate": 0.05,
+          "risk_premium": 0.003,
+          "switching_cost_usd": 2000,
+          "exit_delay_days": 3.0,
+          "reentry_delay_days": 10.0,
+          "hysteresis_band": 0.008,
+          "whale_type": "institutional"
+        },
+        {
+          "whale_id": "morpho_whale_2",
+          "position_usd": 25000000,
+          "alt_rate": 0.048,
+          "risk_premium": 0.004,
+          "switching_cost_usd": 1800,
+          "exit_delay_days": 2.0,
+          "reentry_delay_days": 7.0,
+          "hysteresis_band": 0.006,
+          "whale_type": "quant_desk"
+        }
+      ],
+      "retail_config": {
+        "alpha_plus": 0.3,
+        "alpha_minus_multiplier": 3.0,
+        "response_lag_days": 5.0,
+        "diffusion_sigma": 0.015
+      },
+      "mercenary_config": {
+        "entry_threshold": 0.08,
+        "exit_threshold": 0.06,
+        "max_capital_usd": 15000000
+      }
+    },
+    {
+      "name": "AAVE PYUSD Core",
+      "asset_symbol": "PYUSD",
+      "protocol": "aave",
+      "current_tvl": 400000000,
+      "current_utilization": 0.60,
+      "target_tvl": 400000000,
+      "target_utilization": 0.60,
+      "target_incentive_rate": 0.04,
+      "base_apy": 0.0332,
+      "budget_min": 200000,
+      "budget_max": 500000,
+      "r_max_min": 0.03,
+      "r_max_max": 0.08,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "r_threshold": 0.05,
+      "competitor_rates": {
+        "euler_sentora_pyusd": 0.065,
+        "morpho_pyusd": 0.06,
+        "kamino_earn": 0.0406
+      },
+      "weights": {
+        "w_spend": 1.0,
+        "w_spend_waste_penalty": 2.0,
+        "w_apr_variance": 500000,
+        "w_apr_ceiling": 100000000,
+        "w_tvl_shortfall": 5e-7,
+        "apr_target": 0.073,
+        "apr_ceiling": 0.10,
+        "tvl_target": 400000000,
+        "apr_stability_on_total": true
+      },
+      "whale_profiles": [],
+      "retail_config": {
+        "alpha_plus": 0.2,
+        "alpha_minus_multiplier": 3.0,
+        "response_lag_days": 5.0,
+        "diffusion_sigma": 0.01
+      }
+    },
+    {
+      "name": "Euler Sentora PYUSD",
+      "asset_symbol": "PYUSD",
+      "protocol": "euler",
+      "current_tvl": 250000000,
+      "current_utilization": 0.52,
+      "target_tvl": 250000000,
+      "target_utilization": 0.52,
+      "target_incentive_rate": 0.065,
+      "base_apy": 0.02,
+      "budget_min": 200000,
+      "budget_max": 400000,
+      "r_max_min": 0.04,
+      "r_max_max": 0.10,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "r_threshold": 0.05,
+      "competitor_rates": {
+        "aave_pyusd_core": 0.0332,
+        "morpho_pyusd": 0.06,
+        "kamino_earn": 0.0406
+      },
+      "weights": {
+        "w_spend": 1.0,
+        "w_spend_waste_penalty": 2.0,
+        "w_apr_variance": 1000000,
+        "w_apr_ceiling": 100000000,
+        "w_tvl_shortfall": 5e-7,
+        "apr_target": 0.085,
+        "apr_ceiling": 0.10,
+        "tvl_target": 250000000,
+        "apr_stability_on_total": true
+      },
+      "whale_profiles": [
+        {
+          "whale_id": "euler_whale_1",
+          "position_usd": 50000000,
+          "alt_rate": 0.05,
+          "risk_premium": 0.005,
+          "switching_cost_usd": 3000,
+          "exit_delay_days": 3.0,
+          "reentry_delay_days": 10.0,
+          "hysteresis_band": 0.01,
+          "whale_type": "institutional"
+        }
+      ],
+      "retail_config": {
+        "alpha_plus": 0.2,
+        "alpha_minus_multiplier": 3.0,
+        "response_lag_days": 5.0,
+        "diffusion_sigma": 0.01
+      },
+      "mercenary_config": {
+        "entry_threshold": 0.09,
+        "exit_threshold": 0.07,
+        "max_capital_usd": 20000000
+      }
+    }
+  ]
+}

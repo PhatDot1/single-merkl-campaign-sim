@@ -1,0 +1,3 @@
+# Dune data cache — auto-populated by sync.py
+# Each venue gets a subdirectory: dune/data/{pool_id}/
+# Files: whale_flows.csv, mercenary_detection.csv

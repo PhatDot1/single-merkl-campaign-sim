@@ -1,0 +1,152 @@
+{
+  "total_weekly_budget": 800000,
+  "venues": [
+    {
+      "name": "Morpho PYUSD",
+      "asset_symbol": "PYUSD",
+      "protocol": "morpho",
+      "current_tvl": 195000000,
+      "current_utilization": 0.37,
+      "target_tvl": 100000000,
+      "target_utilization": 0.90,
+      "target_incentive_rate": 0.06,
+      "budget_min": 50000,
+      "budget_max": 300000,
+      "r_max_min": 0.04,
+      "r_max_max": 0.12,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "competitor_rates": {
+        "aave_pyusd_core": 0.04,
+        "euler_sentora_pyusd": 0.065,
+        "kamino_earn": 0.044,
+        "curve_pyusd_usdc": 0.055
+      },
+      "r_threshold": 0.050,
+      "whale_profiles": [
+        {
+          "whale_id": "whale_1", "position_usd": 22440000,
+          "alt_rate": 0.05, "risk_premium": 0.003,
+          "switching_cost_usd": 2000, "exit_delay_days": 3.0,
+          "reentry_delay_days": 10.0, "hysteresis_band": 0.008,
+          "whale_type": "institutional"
+        },
+        {
+          "whale_id": "whale_2", "position_usd": 20500000,
+          "alt_rate": 0.048, "risk_premium": 0.004,
+          "switching_cost_usd": 1800, "exit_delay_days": 2.0,
+          "reentry_delay_days": 7.0, "hysteresis_band": 0.006,
+          "whale_type": "institutional"
+        },
+        {
+          "whale_id": "whale_3", "position_usd": 20350000,
+          "alt_rate": 0.045, "risk_premium": 0.003,
+          "switching_cost_usd": 1500, "exit_delay_days": 2.5,
+          "reentry_delay_days": 8.0, "hysteresis_band": 0.007,
+          "whale_type": "institutional"
+        },
+        {
+          "whale_id": "whale_4", "position_usd": 17430000,
+          "alt_rate": 0.052, "risk_premium": 0.005,
+          "switching_cost_usd": 1000, "exit_delay_days": 1.5,
+          "reentry_delay_days": 5.0, "hysteresis_band": 0.005,
+          "whale_type": "quant_desk"
+        },
+        {
+          "whale_id": "whale_5", "position_usd": 16560000,
+          "alt_rate": 0.05, "risk_premium": 0.004,
+          "switching_cost_usd": 800, "exit_delay_days": 1.0,
+          "reentry_delay_days": 4.0, "hysteresis_band": 0.005,
+          "whale_type": "quant_desk"
+        }
+      ]
+    },
+    {
+      "name": "Euler Sentora PYUSD",
+      "asset_symbol": "PYUSD",
+      "protocol": "euler",
+      "current_tvl": 250000000,
+      "current_utilization": 0.52,
+      "target_tvl": 250000000,
+      "target_utilization": 0.52,
+      "target_incentive_rate": 0.065,
+      "budget_min": 150000,
+      "budget_max": 500000,
+      "r_max_min": 0.04,
+      "r_max_max": 0.10,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "competitor_rates": {
+        "aave_pyusd_core": 0.04,
+        "morpho_pyusd": 0.06,
+        "kamino_earn": 0.044,
+        "curve_pyusd_usdc": 0.055
+      },
+      "r_threshold": 0.050,
+      "whale_profiles": [
+        {
+          "whale_id": "euler_whale_1", "position_usd": 50000000,
+          "alt_rate": 0.05, "risk_premium": 0.005,
+          "switching_cost_usd": 3000, "exit_delay_days": 3.0,
+          "reentry_delay_days": 10.0, "hysteresis_band": 0.01,
+          "whale_type": "institutional"
+        }
+      ]
+    },
+    {
+      "name": "AAVE Core PYUSD",
+      "asset_symbol": "PYUSD",
+      "protocol": "aave",
+      "current_tvl": 400000000,
+      "current_utilization": 0.60,
+      "target_tvl": 400000000,
+      "target_utilization": 0.60,
+      "target_incentive_rate": 0.04,
+      "budget_min": 100000,
+      "budget_max": 500000,
+      "r_max_min": 0.03,
+      "r_max_max": 0.08,
+      "pinned_budget": null,
+      "pinned_r_max": null,
+      "competitor_rates": {
+        "euler_sentora_pyusd": 0.065,
+        "morpho_pyusd": 0.06,
+        "kamino_earn": 0.044,
+        "curve_pyusd_usdc": 0.055
+      },
+      "r_threshold": 0.055,
+      "whale_profiles": [
+        {
+          "whale_id": "aave_whale_1", "position_usd": 40000000,
+          "alt_rate": 0.05, "risk_premium": 0.003,
+          "switching_cost_usd": 2500, "exit_delay_days": 3.0,
+          "reentry_delay_days": 10.0, "hysteresis_band": 0.008,
+          "whale_type": "institutional"
+        }
+      ]
+    },
+    {
+      "name": "Curve PYUSD-USDC",
+      "asset_symbol": "PYUSD",
+      "protocol": "curve",
+      "current_tvl": 30000000,
+      "current_utilization": 0.50,
+      "target_tvl": 30000000,
+      "target_utilization": 0.50,
+      "target_incentive_rate": 0.055,
+      "budget_min": 15000,
+      "budget_max": 80000,
+      "r_max_min": 0.04,
+      "r_max_max": 0.10,
+      "pinned_budget": 31600,
+      "pinned_r_max": 0.055,
+      "competitor_rates": {
+        "aave_pyusd_core": 0.04,
+        "euler_sentora_pyusd": 0.065,
+        "morpho_pyusd": 0.06
+      },
+      "r_threshold": 0.055,
+      "whale_profiles": []
+    }
+  ]
+}

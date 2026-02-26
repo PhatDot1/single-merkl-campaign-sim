@@ -1,0 +1,172 @@
+{
+  "programs": {
+    "PYUSD": {
+      "total_weekly_budget": 1300000,
+      "venues": [
+        {
+          "name": "Morpho PYUSD",
+          "asset_symbol": "PYUSD",
+          "protocol": "morpho",
+          "current_tvl": 195000000,
+          "current_utilization": 0.438,
+          "target_tvl": 100000000,
+          "target_utilization": 0.90,
+          "target_incentive_rate": 0.06,
+          "base_apy": 0.0115,
+          "budget_min": 50000,
+          "budget_max": 300000,
+          "r_max_min": 0.04,
+          "r_max_max": 0.12,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "AAVE PYUSD Core",
+          "asset_symbol": "PYUSD",
+          "protocol": "aave",
+          "current_tvl": 400000000,
+          "current_utilization": 0.60,
+          "target_tvl": 400000000,
+          "target_utilization": 0.60,
+          "target_incentive_rate": 0.04,
+          "base_apy": 0.0332,
+          "budget_min": 200000,
+          "budget_max": 500000,
+          "r_max_min": 0.03,
+          "r_max_max": 0.08,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "Euler Sentora PYUSD",
+          "asset_symbol": "PYUSD",
+          "protocol": "euler",
+          "current_tvl": 250000000,
+          "current_utilization": 0.52,
+          "target_tvl": 250000000,
+          "target_utilization": 0.52,
+          "target_incentive_rate": 0.065,
+          "base_apy": 0.02,
+          "budget_min": 200000,
+          "budget_max": 400000,
+          "r_max_min": 0.04,
+          "r_max_max": 0.10,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "Kamino Earn Vault",
+          "asset_symbol": "PYUSD",
+          "protocol": "kamino",
+          "current_tvl": 352000000,
+          "current_utilization": 0.42,
+          "target_tvl": 352000000,
+          "target_utilization": 0.42,
+          "target_incentive_rate": 0.0444,
+          "base_apy": 0.005,
+          "budget_min": 200000,
+          "budget_max": 400000,
+          "r_max_min": 0.03,
+          "r_max_max": 0.08,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "Curve PYUSD-USDC",
+          "asset_symbol": "PYUSD",
+          "protocol": "curve",
+          "current_tvl": 30000000,
+          "current_utilization": 0.50,
+          "target_tvl": 30000000,
+          "target_utilization": 0.50,
+          "target_incentive_rate": 0.055,
+          "base_apy": 0.01,
+          "budget_min": 20000,
+          "budget_max": 60000,
+          "r_max_min": 0.04,
+          "r_max_max": 0.10,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        }
+      ]
+    },
+    "RLUSD Core": {
+      "total_weekly_budget": 870000,
+      "venues": [
+        {
+          "name": "AAVE RLUSD Core",
+          "asset_symbol": "RLUSD",
+          "protocol": "aave",
+          "current_tvl": 600000000,
+          "current_utilization": 0.40,
+          "target_tvl": 600000000,
+          "target_utilization": 0.40,
+          "target_incentive_rate": 0.0475,
+          "base_apy": 0.025,
+          "budget_min": 400000,
+          "budget_max": 700000,
+          "r_max_min": 0.03,
+          "r_max_max": 0.08,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "Euler Sentora RLUSD",
+          "asset_symbol": "RLUSD",
+          "protocol": "euler",
+          "current_tvl": 190000000,
+          "current_utilization": 0.385,
+          "target_tvl": 190000000,
+          "target_utilization": 0.385,
+          "target_incentive_rate": 0.065,
+          "base_apy": 0.015,
+          "budget_min": 150000,
+          "budget_max": 350000,
+          "r_max_min": 0.04,
+          "r_max_max": 0.10,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        },
+        {
+          "name": "Curve RLUSD-USDC",
+          "asset_symbol": "RLUSD",
+          "protocol": "curve",
+          "current_tvl": 75000000,
+          "current_utilization": 0.50,
+          "target_tvl": 75000000,
+          "target_utilization": 0.50,
+          "target_incentive_rate": 0.06,
+          "base_apy": 0.01,
+          "budget_min": 50000,
+          "budget_max": 150000,
+          "r_max_min": 0.04,
+          "r_max_max": 0.10,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        }
+      ]
+    },
+    "RLUSD Horizon": {
+      "total_weekly_budget": 181000,
+      "venues": [
+        {
+          "name": "AAVE RLUSD Horizon",
+          "asset_symbol": "RLUSD",
+          "protocol": "aave",
+          "current_tvl": 221500000,
+          "current_utilization": 0.60,
+          "target_tvl": 221500000,
+          "target_utilization": 0.60,
+          "target_incentive_rate": 0.0425,
+          "base_apy": 0.02,
+          "budget_min": 100000,
+          "budget_max": 250000,
+          "r_max_min": 0.03,
+          "r_max_max": 0.08,
+          "pinned_budget": null,
+          "pinned_r_max": null
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "grid": {
+    "epoch_duration_days": 7,
+    "merkl_fee_rate": 0.015,
+    "dt_days": 0.5,
+    "horizon_days": 28,
+    "base_apy": 0.0332
+  },
+  "optimal": {
+    "B": 390909.09090909094,
+    "r_max": 0.06333333333333332,
+    "t_bind": 321838687.62816143,
+    "loss": 1713511.740525262,
+    "indices": [
+      "7",
+      "8"
+    ]
+  },
+  "sensitivity": {
+    "eigenvalues": [
+      21833014622.981457,
+      0.0007688796760145021
+    ],
+    "eigenvectors": [
+      [
+        -4.609889615436136e-08,
+        -0.9999999999999989
+      ],
+      [
+        0.9999999999999989,
+        -4.609889615436136e-08
+      ]
+    ],
+    "condition_number": 28395879490732.77,
+    "steep_direction": [
+      -4.609889615436136e-08,
+      0.9999999999999989
+    ],
+    "flat_direction": [
+      -0.9999999999999989,
+      -4.609889615436136e-08
+    ],
+    "interpretation": "APR cap (r_max) is the critical parameter; budget (B) is secondary"
+  },
+  "duality_5pct": [
+    {
+      "B": 390909.09090909094,
+      "r_max": 0.06333333333333332,
+      "t_bind": 321838687.62816143,
+      "loss": 1713511.740525262,
+      "loss_ratio": 1.0
+    }
+  ],
+  "stability_boundary": [],
+  "optimal_diagnostics": {
+    "mean_apr": 0.07824271459211661,
+    "mean_incentive_apr": 0.0450427145921166,
+    "base_apy": 0.0332,
+    "std_apr": 0.0025104298144553883,
+    "apr_p5": 0.07476755114939292,
+    "apr_p95": 0.08293702363554137,
+    "mean_tvl": 454191465.55580276,
+    "tvl_min_p5": 398326166.31194234,
+    "mean_spend": 1563636.3636363624,
+    "mean_budget_util": 0.9999999999999997,
+    "mean_cascade_depth": 0.0,
+    "max_cascade_depth": 0,
+    "mean_mercenary_fraction": 0.03276804018790987,
+    "mean_time_cap_binding": 0.0,
+    "is_feasible": true
+  }
+}
