@@ -1,0 +1,43 @@
+[project]
+name = "incentive-sim"
+version = "0.1.0"
+description = "Single-venue DeFi incentive campaign optimizer with Monte Carlo simulation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40.0",
+    "numpy>=1.26.0",
+    "pandas>=2.1.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "matplotlib>=3.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+sim = "sim.dashboard.app5:main"
+
+[tool.pytest.ini_options]
+testpaths = ["sim/tests"]
+pythonpath = [".", "sim"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.8.0",
+]
