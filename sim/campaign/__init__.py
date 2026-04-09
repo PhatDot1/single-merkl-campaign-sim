@@ -139,6 +139,27 @@ from .state import (
     IRMParams,
     compute_dynamic_base_apy,
 )
+from .analysis import (
+    AnalysisReport,
+    BayesianPosterior,
+    DecayModel,
+    DecayResult,
+    ElasticityModel,
+    IndependenceResult,
+    IndependenceTest,
+    MarketStatus,
+    OLSResult,
+    ProfitabilityAnalyzer,
+    ProfitabilitySnapshot,
+    RegimeAnalyzer,
+    RegimeElasticityResult,
+    generate_report,
+)
+from .backtest import (
+    BacktestResult,
+    BacktestWindow,
+    run_rolling_backtest,
+)
 
 __all__ = [
     # State
@@ -231,4 +252,23 @@ __all__ = [
     "load_surface_result",
     "load_metadata",
     "load_mc_diagnostics",
+    # Analysis
+    "AnalysisReport",
+    "BayesianPosterior",
+    "DecayModel",
+    "DecayResult",
+    "ElasticityModel",
+    "IndependenceResult",
+    "IndependenceTest",
+    "MarketStatus",
+    "OLSResult",
+    "ProfitabilityAnalyzer",
+    "ProfitabilitySnapshot",
+    "RegimeAnalyzer",
+    "RegimeElasticityResult",
+    "generate_report",
+    # Backtest
+    "BacktestResult",
+    "BacktestWindow",
+    "run_rolling_backtest",
 ]

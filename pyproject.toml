@@ -11,6 +11,7 @@ dependencies = [
     "requests>=2.31.0",
     "python-dotenv>=1.0.0",
     "matplotlib>=3.8.0",
+    "scipy>=1.17.1",
 ]
 
 [project.optional-dependencies]

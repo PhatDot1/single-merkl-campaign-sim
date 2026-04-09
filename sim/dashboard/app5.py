@@ -3030,19 +3030,55 @@ def main():
         import matplotlib.pyplot as plt
         from matplotlib.colors import LogNorm
 
+        # Surface metric selector
+        _surface_metric = st.selectbox(
+            "Surface metric:",
+            [
+                "Loss",
+                "Avg TVL ($M)",
+                "Avg Total APR (%)",
+                "Avg Incentive APR (%)",
+                "Budget Utilization (%)",
+                "Downside Risk (Loss + 1\u03c3)",
+            ],
+            key="sv_surface_metric",
+            help="Which metric to display in the surface heatmap.",
+        )
+
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
         ax = axes[0]
         Bv = sv_sr.grid.B_values
         rv = sv_sr.grid.r_max_values
-        L = np.where(sv_sr.feasibility_mask, sv_sr.loss_surface, np.nan)
+        if _surface_metric == "Avg TVL ($M)":
+            L = np.where(sv_sr.feasibility_mask, sv_sr.avg_tvl_surface / 1e6, np.nan)
+            _cmap, _log_ok, _cb_label = "YlOrRd", False, "TVL ($M)"
+        elif _surface_metric == "Avg Total APR (%)":
+            L = np.where(sv_sr.feasibility_mask, sv_sr.avg_apr_surface * 100, np.nan)
+            _cmap, _log_ok, _cb_label = "RdYlGn", False, "APR (%)"
+        elif _surface_metric == "Avg Incentive APR (%)":
+            L = np.where(sv_sr.feasibility_mask, sv_sr.avg_incentive_apr_surface * 100, np.nan)
+            _cmap, _log_ok, _cb_label = "Blues", False, "Incentive APR (%)"
+        elif _surface_metric == "Budget Utilization (%)":
+            L = np.where(sv_sr.feasibility_mask, sv_sr.budget_util_surface * 100, np.nan)
+            _cmap, _log_ok, _cb_label = "Blues", False, "Budget Utilization (%)"
+        elif _surface_metric == "Downside Risk (Loss + 1\u03c3)":
+            L = np.where(
+                sv_sr.feasibility_mask,
+                sv_sr.loss_surface + sv_sr.loss_std_surface,
+                np.nan,
+            )
+            _cmap, _log_ok, _cb_label = "viridis_r", True, "Loss + 1\u03c3"
+        else:  # "Loss" (default)
+            L = np.where(sv_sr.feasibility_mask, sv_sr.loss_surface, np.nan)
+            _cmap, _log_ok, _cb_label = "viridis_r", True, "Loss"
         oi, oj = sv_sr.optimal_indices
         vals = L[~np.isnan(L)]
         norm = None
-        if len(vals) > 0 and vals.max() / max(vals.min(), 1e-10) > 100:
+        if _log_ok and len(vals) > 0 and vals.max() / max(vals.min(), 1e-10) > 100:
             norm = LogNorm(vmin=max(vals.min(), 1e-10), vmax=vals.max())
-        im = ax.pcolormesh(rv * 100, Bv / 1000, L, cmap="viridis_r", norm=norm, shading="nearest")
-        fig.colorbar(im, ax=ax, label="Loss", shrink=0.8)
+        im = ax.pcolormesh(rv * 100, Bv / 1000, L, cmap=_cmap, norm=norm, shading="nearest")
+        fig.colorbar(im, ax=ax, label=_cb_label, shrink=0.8)
         ax.plot(
             rv[oj] * 100,
             Bv[oi] / 1000,
@@ -3143,6 +3179,63 @@ def main():
             f"${annual_cost / 1e6:.2f}M",
             help="Annualized incentive spend at this weekly budget.",
         )
+
+    # Market Health & NII
+    with st.expander("Market Health & Net Interest Income", expanded=False):
+        _util = ir["target_util"]
+        _supply_apr = sv_base_disp  # base APY observed at current TVL
+        _rf = sv_v.get("reserve_factor", 0.10)
+        _denom = _util * (1.0 - _rf)
+        # Back-calculate borrow APR from supply APR and utilization
+        _borrow_apr = _supply_apr / _denom if (_denom > 0 and _supply_apr > 0) else 0.0
+        _tvl = sv_target_disp
+        _daily_nii = (_tvl * _util * _borrow_apr - _tvl * _supply_apr) / 365.0
+        _breakeven_u = _supply_apr / _borrow_apr if _borrow_apr > 0 else 0.0
+        _daily_incentives = sv_B / 7.0
+        _net_daily = _daily_nii - _daily_incentives
+        _band = 0.05
+        if _util >= _breakeven_u + _band:
+            _status_label, _status_icon = "Well-Utilised", "\U0001f7e2"
+        elif _util >= _breakeven_u - _band:
+            _status_label, _status_icon = "At Breakeven", "\U0001f7e1"
+        else:
+            _status_label, _status_icon = "Under-Utilised", "\U0001f534"
+        mh_c1, mh_c2, mh_c3, mh_c4 = st.columns(4)
+        with mh_c1:
+            st.metric(
+                "Daily NII",
+                f"${_daily_nii:,.0f}",
+                help="Estimated daily net interest income = (TVL \u00d7 util \u00d7 borrow_APR \u2212 TVL \u00d7 supply_APR) / 365.",
+            )
+        with mh_c2:
+            st.metric(
+                "Breakeven Util",
+                f"{_breakeven_u:.1%}",
+                help="Utilization at which borrow revenue equals supply cost (supply_APR / borrow_APR).",
+            )
+        with mh_c3:
+            st.metric(
+                "Net (NII \u2212 Incentives)",
+                f"${_net_daily:,.0f}",
+                help="Daily NII minus daily incentive spend at this weekly budget.",
+            )
+        with mh_c4:
+            st.metric(
+                "Market Status",
+                f"{_status_icon} {_status_label}",
+                help=(
+                    "\U0001f7e2 Well-Utilised: util > breakeven + 5pp. "
+                    "\U0001f7e1 At Breakeven: within 5pp of breakeven. "
+                    "\U0001f534 Under-Utilised: util < breakeven \u2212 5pp."
+                ),
+            )
+        if _borrow_apr > 0:
+            st.caption(
+                f"Assumed reserve factor {_rf:.0%}. "
+                f"Back-calculated borrow APR: {_borrow_apr:.2%}, supply APR: {_supply_apr:.2%}."
+            )
+        else:
+            st.caption("Supply APR is zero \u2014 NII cannot be estimated.")
 
     # Export
     st.subheader("Export")
