@@ -13,6 +13,9 @@ dependencies = [
     "matplotlib>=3.8.0",
     "scipy>=1.17.1",
     "plotly>=6.7.0",
+    "bcrypt>=5.0.0",
+    "sqlalchemy>=2.0.48",
+    "psycopg2-binary>=2.9.11",
 ]
 
 [project.optional-dependencies]
