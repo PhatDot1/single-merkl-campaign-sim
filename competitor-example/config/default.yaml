@@ -1,0 +1,52 @@
+# Bayesian Incentives Optimizer - Default Configuration
+# Copy this file and modify for your protocol.
+
+market:
+  name: "My Market"
+
+# Interest rate model (kinked curve)
+# Set to null to use APR columns from data directly.
+rate_model:
+  r_base: 0.0
+  r_slope1: 0.05
+  r_slope2: 3.0
+  u_optimal: 0.80
+  reserve_factor: 0.10
+
+# Bayesian priors
+priors:
+  beta_mu: 0.0          # prior mean for elasticity (0 = no assumed effect)
+  beta_sigma: 1000000.0  # prior std (diffuse / uninformative)
+
+# Optimization
+optimization:
+  n_mc: 2000         # Monte Carlo samples per grid point
+  horizon: 30        # projection horizon (days)
+  grid_n: 20         # grid resolution per dimension
+  supply_range: null  # [min, max] or null for auto
+  borrow_range: null  # [min, max] or null for auto
+
+# Convergence
+convergence:
+  cv_threshold: 0.10       # coefficient of variation threshold
+  profit_tolerance: 10.0   # $/day change threshold
+
+# Regime analysis
+regimes:
+  vol_high_quantile: 0.75
+  vol_extreme_quantile: 0.90
+  util_high: 0.85
+  util_extreme: 0.95
+  bootstrap_n: 1000
+
+# Column mapping (override if your columns have different names)
+columns:
+  tvl: "tvl"
+  incentive_total: "incentive_total"
+  incentive_supply: "incentive_supply"
+  incentive_borrow: "incentive_borrow"
+  utilization: "utilization"
+  borrow_volume: "borrow_volume"
+  supply_apr: "supply_apr"
+  borrow_apr: "borrow_apr"
+  price: "price"

@@ -399,6 +399,7 @@ def fetch_base_apy(
     kamino_vault_pubkey: str | None = None,
     aave_market: str = "core",
     rpc_url: str | None = None,
+    pool_id_contains: str | None = None,
 ) -> BaseAPYResult:
     """
     Unified base APY fetcher. Routes to protocol-specific method.
@@ -437,6 +438,7 @@ def fetch_base_apy(
             defillama_project or "curve-dex",
             asset_symbol,
             chain,
+            pool_id_contains=pool_id_contains,
         )
 
     # Generic fallback
@@ -472,6 +474,7 @@ def fetch_all_base_apys(venue_configs: list[dict]) -> dict[str, BaseAPYResult]:
                 kamino_market_name=v.get("kamino_market_name"),
                 kamino_vault_pubkey=v.get("kamino_vault_pubkey"),
                 aave_market=v.get("aave_market", "core"),
+                pool_id_contains=v.get("pool_id_contains"),
             )
         except Exception as e:
             result = BaseAPYResult(

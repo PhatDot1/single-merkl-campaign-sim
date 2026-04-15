@@ -59,7 +59,7 @@ from campaign.base_apy import (
     fetch_euler_base_apy,
     fetch_morpho_base_apy,
 )
-from campaign.evm_data import _eth_call, _decode_uint256, get_eth_rpc_url
+from campaign.evm_data import _eth_call, _decode_uint256, get_eth_rpc_url, fetch_euler_vault_data
 
 # ============================================================================
 # CONSTANTS & VENUE CONFIGURATION
@@ -90,9 +90,29 @@ EULER_VAULT_ADDRS = {
     "euler_pyusd": "0xba98fC35C9dfd69178AD5dcE9FA29c64554783b5",
 }
 
+# Curve pool addresses
+CURVE_POOL_ADDRS = {
+    "curve_rlusd": "0xD001aE433f254283FeCE51d4ACcE8c53263aa186",  # RLUSD-USDC
+    "curve_pyusd": "0x383E6b4437b59fff47B619CBA855CA29342A8559",  # PYUSD-USDC
+}
+
+# Kraken Earn LP addresses for Curve pools
+# (separate from KRAKEN_STRATEGY_ADDRS because Curve uses LP-token balance, not ERC4626)
+CURVE_KRAKEN_LP_ADDRS: dict[str, str | None] = {
+    "curve_pyusd": "0xb11ed12e302815c8c5f12a3a1a93ebd7bd730a21",  # Curve PayPool LP
+    "curve_rlusd": None,  # no Kraken address yet — will be added in future
+}
+
+# DeFiLlama pool IDs for Curve TVL lookup
+CURVE_DEFILLAMA_IDS = {
+    "curve_rlusd": "e91e23af-9099-45d9-8ba5-ea5b4638e453",
+    "curve_pyusd": "14681aee-05c9-4733-acd0-7b2c84616209",
+}
+
 RLUSD_ADDRESS = "0x8292Bb45bf1Ee4d140127049757C0C38e47a8A75"
 PYUSD_ADDRESS = "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8"
-STABLECOIN_DECIMALS = 6
+STABLECOIN_DECIMALS = 6   # PYUSD decimals
+RLUSD_DECIMALS = 18        # RLUSD is a standard 18-decimal ERC20
 
 MORPHO_GRAPHQL_URL = "https://api.morpho.org/graphql"
 
@@ -209,6 +229,52 @@ VENUES: list[VenueConfig] = [
             "asset": "PYUSD",
             "chain": "Ethereum",
             "defillama_project": "euler-v2",
+        },
+    ),
+    VenueConfig(
+        key="curve_rlusd",
+        label="Curve RLUSD-USDC",
+        asset="RLUSD",
+        protocol="curve",
+        default_total_tvl_m=75.0,
+        default_kraken_tvl_m=0.000001,  # $1 placeholder — no Kraken address yet
+        default_budget_a=80.0,
+        default_budget_b=5.0,
+        default_rmax_a=50.00,  # pure float, no cap on Campaign A
+        default_rmax_b=2.00,
+        default_base_apy=0.5,
+        floor_apy=None,
+        floor_label=None,
+        vault_address=CURVE_POOL_ADDRS["curve_rlusd"],
+        base_apy_config={
+            "name": "Curve RLUSD-USDC",
+            "protocol": "curve",
+            "asset": "RLUSD",
+            "chain": "Ethereum",
+            "pool_id_contains": "e91e23af",
+        },
+    ),
+    VenueConfig(
+        key="curve_pyusd",
+        label="Curve PYUSD-USDC",
+        asset="PYUSD",
+        protocol="curve",
+        default_total_tvl_m=30.0,
+        default_kraken_tvl_m=0.000001,  # no Kraken LP balance yet
+        default_budget_a=40.0,
+        default_budget_b=5.0,
+        default_rmax_a=50.00,  # pure float, no cap on Campaign A
+        default_rmax_b=1.00,
+        default_base_apy=0.3,
+        floor_apy=None,
+        floor_label=None,
+        vault_address=CURVE_POOL_ADDRS["curve_pyusd"],
+        base_apy_config={
+            "name": "Curve PYUSD-USDC",
+            "protocol": "curve",
+            "asset": "PYUSD",
+            "chain": "Ethereum",
+            "pool_id_contains": "14681aee",
         },
     ),
 ]
@@ -405,6 +471,34 @@ def _balance_of_onchain(vault: str, holder: str, decimals: int = 6) -> float:
         return 0.0
 
 
+def _curve_lp_value_onchain(pool: str, holder: str) -> float:
+    """
+    Get USD value of Curve LP tokens held by `holder` in `pool`.
+    Uses balanceOf(holder) * get_virtual_price() / 1e36.
+    LP tokens are 18 decimals; virtual_price is 18 decimals.
+    """
+    rpc_url = get_eth_rpc_url()
+    try:
+        bal = _decode_uint256(
+            _eth_call(rpc_url, pool, "0x70a08231" + holder[2:].lower().zfill(64))
+        )
+        if bal == 0:
+            return 0.0
+        vp = _decode_uint256(_eth_call(rpc_url, pool, "0xbb7b8b80"))  # get_virtual_price()
+        return bal * vp / 1e36
+    except Exception:
+        return 0.0
+
+
+def _get_token_decimals(token_address: str) -> int:
+    """Call ERC20 decimals() on-chain.  Falls back to 6 on error."""
+    rpc_url = get_eth_rpc_url()
+    try:
+        return _decode_uint256(_eth_call(rpc_url, token_address, "0x313ce567"))
+    except Exception:
+        return 6
+
+
 def _morpho_gql_vault_by_asset(asset_address: str) -> list[dict]:
     """Search Morpho GQL for MetaMorpho vaults by asset address, ordered by TVL desc."""
     query = """
@@ -418,6 +512,7 @@ def _morpho_gql_vault_by_asset(asset_address: str) -> list[dict]:
         items {
           address
           name
+          asset { decimals }
           state { totalAssets }
         }
       }
@@ -437,13 +532,50 @@ def _morpho_gql_vault_by_asset(asset_address: str) -> list[dict]:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_live_kraken_tvls() -> dict[str, float]:
     """
-    On-chain totalAssets() for each strategy contract.
+    For each Kraken strategy address, call balanceOf(strategy) on the underlying
+    vault then convertToAssets(shares).  Strategy contracts are Boring Vault
+    strategies that do NOT implement ERC4626 totalAssets() themselves.
     Returns {venue_key: tvl_usd}.  Sums multi-address venues.
     """
+    # Underlying vault address and asset decimals per venue key
+    rlusd_decimals = RLUSD_DECIMALS
+
+    # Resolve Morpho RLUSD vault address dynamically if needed
+    morpho_rlusd_vault = MORPHO_VAULT_ADDRS.get("morpho_rlusd")
+    if not morpho_rlusd_vault:
+        try:
+            vaults = _morpho_gql_vault_by_asset(RLUSD_ADDRESS)
+            if vaults:
+                morpho_rlusd_vault = vaults[0]["address"]
+        except Exception:
+            pass
+
+    vault_lookup: dict[str, tuple[str | None, int]] = {
+        "morpho_rlusd": (morpho_rlusd_vault, rlusd_decimals),
+        "morpho_pyusd": (MORPHO_VAULT_ADDRS["morpho_pyusd"], STABLECOIN_DECIMALS),
+        "euler_rlusd":  (EULER_VAULT_ADDRS["euler_rlusd"],  rlusd_decimals),
+        "euler_pyusd":  (EULER_VAULT_ADDRS["euler_pyusd"],  STABLECOIN_DECIMALS),
+    }
+
     results: dict[str, float] = {}
     for key, addrs in KRAKEN_STRATEGY_ADDRS.items():
-        total = sum(_total_assets_onchain(a, STABLECOIN_DECIMALS) for a in addrs)
-        results[key] = total
+        underlying_vault, decimals = vault_lookup.get(key, (None, STABLECOIN_DECIMALS))
+        if not underlying_vault:
+            results[key] = 0.0
+            continue
+        results[key] = sum(
+            _balance_of_onchain(underlying_vault, strategy, decimals)
+            for strategy in addrs
+        )
+
+    # ── Curve Kraken LP positions — LP balance × virtual_price ──
+    for key, holder in CURVE_KRAKEN_LP_ADDRS.items():
+        if not holder:
+            continue
+        pool = CURVE_POOL_ADDRS.get(key)
+        if pool:
+            results[key] = _curve_lp_value_onchain(pool, holder)
+
     return results
 
 
@@ -451,39 +583,58 @@ def fetch_live_kraken_tvls() -> dict[str, float]:
 def fetch_live_vault_tvls() -> dict[str, float]:
     """
     Fetch total vault TVLs ($USD) for each venue.
-    Morpho: GraphQL totalAssets on vault contract.
-    Euler: ERC4626 totalAssets() on vault address.
+    Morpho: GraphQL totalAssets on vault contract (asset decimals from GQL).
+    Euler: fetch_euler_vault_data which fetches asset decimals on-chain.
+    Returns raw USD values (not $M); callers divide by 1e6 for $M.
     """
     results: dict[str, float] = {}
 
     # ── Morpho PYUSD ──
+    # total_assets from fetch_morpho_base_apy is already in USD — do NOT multiply by 1e6
     try:
         data = fetch_morpho_base_apy(
             MORPHO_VAULT_ADDRS["morpho_pyusd"], chain_id=1, decimals=6
         )
-        results["morpho_pyusd"] = data.details.get("total_assets", 0.0) * 1e6
+        results["morpho_pyusd"] = data.details.get("total_assets", 0.0)
     except Exception:
         results["morpho_pyusd"] = 0.0
 
-    # ── Morpho RLUSD — discover vault dynamically ──
+    # ── Morpho RLUSD — discover vault dynamically; use GQL asset decimals ──
     try:
         vaults = _morpho_gql_vault_by_asset(RLUSD_ADDRESS)
         if vaults:
-            # Largest TVL vault
             v = vaults[0]
             raw_assets = int(v["state"]["totalAssets"] or 0)
-            results["morpho_rlusd"] = raw_assets / (10 ** STABLECOIN_DECIMALS)
+            asset_decimals = (v.get("asset") or {}).get("decimals") or RLUSD_DECIMALS
+            results["morpho_rlusd"] = raw_assets / (10 ** asset_decimals)
             MORPHO_VAULT_ADDRS["morpho_rlusd"] = v["address"]
         else:
             results["morpho_rlusd"] = 0.0
     except Exception:
         results["morpho_rlusd"] = 0.0
 
-    # ── Euler RLUSD / PYUSD ──
+    # ── Euler RLUSD / PYUSD — fetch_euler_vault_data fetches asset decimals on-chain ──
     for key, addr in EULER_VAULT_ADDRS.items():
         try:
-            results[key] = _total_assets_onchain(addr, STABLECOIN_DECIMALS)
+            asset_sym = key.split("_")[1].upper()
+            vdata = fetch_euler_vault_data(addr, asset_sym)
+            results[key] = vdata.total_supply_usd
         except Exception:
+            results[key] = 0.0
+
+    # ── Curve RLUSD-USDC / PYUSD-USDC — DeFiLlama yields API ──
+    try:
+        dl_resp = requests.get("https://yields.llama.fi/pools", timeout=30)
+        dl_resp.raise_for_status()
+        dl_pools = {p["pool"]: p for p in dl_resp.json().get("data", [])}
+    except Exception:
+        dl_pools = {}
+
+    for key, pool_id in CURVE_DEFILLAMA_IDS.items():
+        pool = dl_pools.get(pool_id)
+        if pool:
+            results[key] = pool.get("tvlUsd", 0.0)
+        else:
             results[key] = 0.0
 
     return results
@@ -502,6 +653,66 @@ def fetch_live_base_apys() -> dict[str, float]:
         }
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_euler_caps() -> dict[str, dict]:
+    """
+    Fetch Euler vault supply cap status via ERC4626 maxDeposit(address).
+
+    These Sentora/Euler Earn vaults don't expose caps() directly.
+    Instead we use:
+      - totalAssets()  → current vault TVL (USD)
+      - maxDeposit(addr) → remaining deposit capacity (0 = at cap)
+      - Inferred supply cap = totalAssets + maxDeposit
+
+    Returns {venue_key: {
+        "total_supply_usd": float,   # current TVL
+        "remaining_usd": float,      # room before cap (0 = at cap)
+        "supply_cap_usd": float,     # inferred cap (current + remaining)
+        "at_cap": bool,              # True if no more deposits possible
+    }}.
+    """
+    ASSET_DECIMALS = {"euler_rlusd": RLUSD_DECIMALS, "euler_pyusd": STABLECOIN_DECIMALS}
+    MAX_DEPOSIT_SEL = "0x402d267d"  # maxDeposit(address)
+    ADDR_ONE_PADDED = "0" * 63 + "1"  # address(1)
+    TOTAL_ASSETS_SEL = "0x01e1d114"
+
+    rpc_url = get_eth_rpc_url()
+    results: dict[str, dict] = {}
+    for key, addr in EULER_VAULT_ADDRS.items():
+        dec = ASSET_DECIMALS.get(key, 6)
+        try:
+            total_raw = _decode_uint256(_eth_call(rpc_url, addr, TOTAL_ASSETS_SEL))
+            total_usd = total_raw / (10 ** dec)
+
+            remaining_raw = _decode_uint256(
+                _eth_call(rpc_url, addr, MAX_DEPOSIT_SEL + ADDR_ONE_PADDED)
+            )
+            # type(uint256).max means unlimited
+            if remaining_raw > 10 ** 30:
+                remaining_usd = 0.0
+                cap_usd = 0.0  # 0 = unlimited
+                at_cap = False
+            else:
+                remaining_usd = remaining_raw / (10 ** dec)
+                cap_usd = total_usd + remaining_usd
+                at_cap = remaining_usd == 0.0
+
+            results[key] = {
+                "total_supply_usd": total_usd,
+                "remaining_usd": remaining_usd,
+                "supply_cap_usd": cap_usd,
+                "at_cap": at_cap,
+            }
+        except Exception:
+            results[key] = {
+                "total_supply_usd": 0.0,
+                "remaining_usd": 0.0,
+                "supply_cap_usd": 0.0,
+                "at_cap": False,
+            }
+    return results
 
 
 # ============================================================================
@@ -698,13 +909,14 @@ with st.sidebar:
         label = next((v.label for v in VENUES if v.key == key), key)
         for a in addrs:
             st.caption(f"**{label}**: `{a[:10]}…`")
+    for key, addr in CURVE_KRAKEN_LP_ADDRS.items():
+        if addr:
+            label = next((v.label for v in VENUES if v.key == key), key)
+            st.caption(f"**{label}**: `{addr[:10]}…`")
 
-    st.divider()
-    st.subheader("Global settings")
-    min_kraken_merkl = st.number_input(
-        "Min Kraken Merkl floor (%)", value=KRAKEN_MIN_MERKL, min_value=0.0, max_value=10.0, step=0.1,
-        help="Alert when Kraken combined Merkl rate drops below this.",
-    )
+
+
+min_kraken_merkl = KRAKEN_MIN_MERKL
 
 # ── Fetch live data (silent, with fallbacks) ─────────────────────────────────
 with st.spinner("Fetching live data…"):
@@ -720,10 +932,30 @@ with st.spinner("Fetching live data…"):
         live_base_apy = fetch_live_base_apys()
     except Exception:
         live_base_apy = {}
+    try:
+        euler_caps = fetch_euler_caps()
+    except Exception:
+        euler_caps = {}
 
 def _resolve_default(venue: VenueConfig, live_dict: dict, default_val: float) -> float:
     val = live_dict.get(venue.key, 0.0)
     return val / 1e6 if val > 0 else default_val  # live_vault comes in raw USD
+
+
+def _format_cap(cap_info: dict | None) -> str:
+    """Format Euler supply cap for the summary table."""
+    if not cap_info:
+        return "—"
+    if cap_info.get("supply_cap_usd", 0) == 0:
+        return "∞ (unlimited)" if cap_info.get("total_supply_usd", 0) > 0 else "—"
+    cap_m = cap_info["supply_cap_usd"] / 1e6
+    cur_m = cap_info["total_supply_usd"] / 1e6
+    pct = cur_m / cap_m * 100 if cap_m > 0 else 0
+    if cap_info.get("at_cap"):
+        return f"⚠ AT CAP ${cap_m:,.0f}M"
+    if pct >= 90:
+        return f"⚠ ${cap_m:,.0f}M ({pct:.0f}%)"
+    return f"${cap_m:,.0f}M ({pct:.0f}%)"
 
 
 # ── Cross-venue summary table ─────────────────────────────────────────────────
@@ -748,6 +980,7 @@ with st.expander("📊 Cross-venue summary", expanded=True):
             "Total spend ($K/wk)": f"${c['total_spend']:.1f}K",
             "Unspent ($K/wk)": f"${c['unspent']:.1f}K",
             f"Kraken headroom (>{min_kraken_merkl:.1f}% Merkl)": f"+${hdroom:.1f}M",
+            "Supply Cap": _format_cap(euler_caps.get(v.key)),
         })
     import pandas as pd
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
@@ -799,6 +1032,37 @@ for venue in VENUES:
         else:
             data_cols[2].info(f"Default base APY: {venue.default_base_apy:.2f}%", icon="📌")
 
+        # ── Euler supply cap banner ───────────────────────────────────────
+        cap_info = euler_caps.get(venue.key)
+        if cap_info and cap_info["supply_cap_usd"] > 0:
+            cap_m = cap_info["supply_cap_usd"] / 1e6
+            current_m = (cap_info["total_supply_usd"] / 1e6) if cap_info["total_supply_usd"] > 0 else init_total_m
+            headroom_cap = cap_m - current_m
+            utilisation_pct = (current_m / cap_m * 100) if cap_m > 0 else 0
+            if headroom_cap <= 0:
+                st.error(
+                    f"🚫 **Euler supply cap reached!** Cap: ${cap_m:,.1f}M — "
+                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised). "
+                    f"To facilitate growth, increase Euler cap by at least **${abs(headroom_cap) + 10:,.0f}M** "
+                    f"to **${cap_m + abs(headroom_cap) + 10:,.0f}M**.",
+                    icon="🔴",
+                )
+            elif headroom_cap < 20:
+                st.warning(
+                    f"⚠️ **Euler supply cap is tight.** Cap: ${cap_m:,.1f}M — "
+                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
+                    f"${headroom_cap:,.1f}M remaining). "
+                    f"To accommodate further growth, increase Euler cap to at least **${current_m + 50:,.0f}M**.",
+                    icon="⚠️",
+                )
+            else:
+                st.success(
+                    f"Euler supply cap: ${cap_m:,.1f}M — "
+                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
+                    f"${headroom_cap:,.1f}M headroom)",
+                    icon="✅",
+                )
+
         st.divider()
 
         # ── Row 1: Input columns ──────────────────────────────────────────
@@ -811,12 +1075,14 @@ for venue in VENUES:
                 min_value=0.0, max_value=1_500.0, step=1.0,
                 value=float(st.session_state[f"{k}_nk_tvl"]),
                 key=f"{k}_nk_tvl_slider",
+                help="TVL from non-Kraken depositors. This is Total TVL minus Kraken TVL.",
             )
             k_tvl = st.slider(
                 "Kraken Earn TVL ($M)",
                 min_value=0.0, max_value=1_000.0, step=1.0,
                 value=float(st.session_state[f"{k}_k_tvl"]),
                 key=f"{k}_k_tvl_slider",
+                help="Kraken Earn strategy deposits. Dilutes both Campaign A (part of total TVL) and Campaign B (direct denominator).",
             )
             base_apy = st.number_input(
                 "Base organic APY (%)",
@@ -837,15 +1103,17 @@ for venue in VENUES:
                 index=["Set budget ($K/wk)", "Set target rate (%)"].index(
                     st.session_state[f"{k}_mode_a"]
                 ),
+                help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
             )
             st.session_state[f"{k}_mode_a"] = mode_a
 
+            _rmax_a_max = max(15.0, float(st.session_state[f"{k}_rmax_a"]) * 1.5)
             rmax_a = st.slider(
                 "Rmax A (cap, %/yr)",
-                min_value=0.1, max_value=15.0, step=0.1, format="%.1f",
+                min_value=0.1, max_value=_rmax_a_max, step=0.1, format="%.1f",
                 value=float(st.session_state[f"{k}_rmax_a"]),
                 key=f"{k}_rmax_a_slider",
-                help="Maximum incentive APR Campaign A will pay. Budget may underspend below this TVL.",
+                help="Maximum incentive APR Campaign A will pay. Set very high for pure-float (no cap). Budget underspends when rate hits this cap.",
             )
 
             total_tvl = nk_tvl + k_tvl  # $M
@@ -855,6 +1123,7 @@ for venue in VENUES:
                     min_value=0.0, max_value=1_000.0, step=0.5, format="%.1f",
                     value=float(st.session_state[f"{k}_budg_a"]),
                     key=f"{k}_budg_a_slider",
+                    help="Weekly budget for Campaign A distributed pro-rata to all depositors (Kraken + non-Kraken).",
                 )
                 # Show implied rate
                 if total_tvl > 0:
@@ -867,6 +1136,7 @@ for venue in VENUES:
                     min_value=0.01, max_value=rmax_a, step=0.05, format="%.2f",
                     value=min(float(st.session_state[f"{k}_budg_a"] * 52 / (total_tvl * 1_000) * 100) if total_tvl > 0 else 1.0, rmax_a),
                     key=f"{k}_rate_a_target",
+                    help="Desired Campaign A annual incentive rate. Budget is computed to achieve this rate at current TVL.",
                 )
                 budget_a = budget_for_target_rate(target_rate_a, total_tvl, rmax_a)
                 st.caption(f"→ Required budget: **${budget_a:.1f}K/wk**")
@@ -882,6 +1152,7 @@ for venue in VENUES:
                 index=["Set budget ($K/wk)", "Set target rate (%)"].index(
                     st.session_state[f"{k}_mode_b"]
                 ),
+                help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
             )
             st.session_state[f"{k}_mode_b"] = mode_b
 
@@ -899,6 +1170,7 @@ for venue in VENUES:
                     min_value=0.0, max_value=200.0, step=0.5, format="%.1f",
                     value=float(st.session_state[f"{k}_budg_b"]),
                     key=f"{k}_budg_b_slider",
+                    help="Weekly budget for Campaign B distributed only to whitelisted Kraken Earn address(es).",
                 )
                 if k_tvl > 0 and rmax_b > 0:
                     impl_rate_b = min(rmax_b, budget_b * 52 / (k_tvl * 1_000) * 100)
@@ -912,6 +1184,7 @@ for venue in VENUES:
                         rmax_b if rmax_b > 0 else 1.0,
                     ),
                     key=f"{k}_rate_b_target",
+                    help="Desired Campaign B annual incentive rate. Budget is computed to achieve this rate at current Kraken TVL.",
                 )
                 budget_b = budget_for_target_rate(target_rate_b, k_tvl, rmax_b)
                 st.caption(f"→ Required budget: **${budget_b:.1f}K/wk**")
@@ -921,7 +1194,6 @@ for venue in VENUES:
         non_kraken_allin = c["non_kraken_merkl"] + base_apy
         kraken_allin = c["kraken_merkl"] + base_apy
         floor_breached = (venue.floor_apy is not None) and (non_kraken_allin < venue.floor_apy)
-        kraken_below_floor = c["kraken_merkl"] < min_kraken_merkl
 
         breakeven_b_m = c["breakeven_b_m"]
         headroom_b = max(0.0, breakeven_b_m - k_tvl)
@@ -947,6 +1219,7 @@ for venue in VENUES:
                 f"{non_kraken_allin:.2f}%",
                 delta=f"{'⚠ BELOW FLOOR' if floor_breached else ''}",
                 delta_color="inverse" if floor_breached else "off",
+                help="Base APY + Merkl incentive rate for non-Kraken depositors.",
             )
             if floor_breached:
                 st.error(f"Below {venue.floor_label or 'floor'} ({venue.floor_apy:.1f}%)!", icon="🔴")
@@ -960,19 +1233,18 @@ for venue in VENUES:
             st.metric(
                 "Kraken all-in APY",
                 f"{kraken_allin:.2f}%",
-                delta=f"{'⚠ BELOW {:.1f}%'.format(min_kraken_merkl) if kraken_below_floor else '✓ Above floor'}",
-                delta_color="inverse" if kraken_below_floor else "normal",
+                help="Base APY + Campaign A + Campaign B combined incentive rate for Kraken Earn.",
             )
-            if kraken_below_floor:
-                st.error(f"Kraken Merkl below {min_kraken_merkl:.1f}% minimum!", icon="🔴")
 
         with m3:
             st.metric("Campaign A rate", f"{c['rate_a']:.3f}%",
                       delta="at cap" if c["at_cap_a"] else "below cap",
-                      delta_color="off")
+                      delta_color="off",
+                      help="Effective Campaign A incentive rate. 'At cap' means Rmax A has been reached and budget is underspent.")
             st.metric("Campaign B rate", f"{c['rate_b']:.3f}%",
                       delta="at cap" if c["at_cap_b"] else "below cap",
-                      delta_color="off")
+                      delta_color="off",
+                      help="Effective Campaign B incentive rate (Kraken only). 'At cap' means Rmax B has been reached.")
 
         with m4:
             st.metric(
@@ -980,10 +1252,12 @@ for venue in VENUES:
                 f"${c['total_spend']:.1f}K/wk",
                 delta=f"-${c['unspent']:.1f}K unspent" if c["unspent"] > 0.5 else "fully deployed",
                 delta_color="normal" if c["unspent"] > 0.5 else "off",
+                help="Combined weekly spend across both campaigns. Unspent means rate cap was hit before budget was exhausted.",
             )
             st.metric(
                 "Annualised cost",
                 f"${(c['total_spend'] * 52 / 1_000):.2f}M/yr",
+                help="Total spend extrapolated to annual cost (spend × 52 weeks).",
             )
 
         st.divider()
@@ -999,8 +1273,9 @@ for venue in VENUES:
         cap2.metric(
             "Headroom before B compresses",
             f"+${headroom_b:.1f}M",
-            delta="✓ comfortable" if headroom_b > 20 else ("⚠ tightening" if headroom_b > 5 else "⚠ at cap"),
-            delta_color="normal" if headroom_b > 20 else ("off" if headroom_b > 5 else "inverse"),
+            delta="⚠ tightening" if 5 < headroom_b <= 20 else ("⚠ at cap" if headroom_b <= 5 else ""),
+            delta_color="off" if headroom_b > 20 else ("off" if headroom_b > 5 else "inverse"),
+            help="How much more Kraken TVL can grow before Campaign B rate compresses below Rmax B.",
         )
         cap3.metric(
             f"Max Kraken TVL >{min_kraken_merkl:.1f}% Merkl",
@@ -1010,9 +1285,28 @@ for venue in VENUES:
         cap4.metric(
             "Additional Kraken capacity",
             f"+${additional_before_3p5:.1f}M",
-            delta="✓ ample" if additional_before_3p5 > 50 else ("⚠ moderate" if additional_before_3p5 > 20 else "⚠ limited"),
-            delta_color="normal" if additional_before_3p5 > 50 else ("off" if additional_before_3p5 > 20 else "inverse"),
+            delta="⚠ moderate" if 20 < additional_before_3p5 <= 50 else ("⚠ limited" if additional_before_3p5 <= 20 else ""),
+            delta_color="off" if additional_before_3p5 > 50 else ("off" if additional_before_3p5 > 20 else "inverse"),
+            help=f"How much more Kraken TVL can be added before combined Merkl rate drops below {min_kraken_merkl:.1f}%.",
         )
+
+        # ── Euler cap vs scenario TVL check ───────────────────────────────
+        if cap_info and cap_info["supply_cap_usd"] > 0:
+            cap_m = cap_info["supply_cap_usd"] / 1e6
+            scenario_tvl = nk_tvl + k_tvl  # slider TVL ($M)
+            if scenario_tvl > cap_m:
+                needed = scenario_tvl - cap_m
+                st.error(
+                    f"🚫 Scenario TVL (${scenario_tvl:.0f}M) exceeds Euler supply cap (${cap_m:,.0f}M). "
+                    f"**Increase Euler cap by ${needed:,.0f}M to ${scenario_tvl:,.0f}M** to support this scenario.",
+                    icon="🔴",
+                )
+            elif (cap_m - scenario_tvl) < 20:
+                st.warning(
+                    f"⚠️ Scenario TVL (${scenario_tvl:.0f}M) is within ${cap_m - scenario_tvl:,.1f}M of "
+                    f"Euler supply cap (${cap_m:,.0f}M). Consider increasing cap to **${scenario_tvl + 50:,.0f}M**.",
+                    icon="⚠️",
+                )
 
         # ── Row 4: Detailed breakdown ─────────────────────────────────────
         with st.expander("Detailed breakdown", expanded=False):
@@ -1111,10 +1405,10 @@ for venue in VENUES:
                 delta_kraken = c_new["kraken_merkl"] - c["kraken_merkl"]
                 delta_nk = c_new["non_kraken_merkl"] - c["non_kraken_merkl"]
                 ra1, ra2, ra3, ra4 = st.columns(4)
-                ra1.metric("New Budget A", f"${a_new:.1f}K/wk", delta=f"{a_new - budget_a:+.1f}K", delta_color="inverse")
-                ra2.metric("New Budget B", f"${b_new:.1f}K/wk", delta=f"{b_new - budget_b:+.1f}K", delta_color="normal")
-                ra3.metric("Kraken Merkl change", f"{c_new['kraken_merkl']:.3f}%", delta=f"{delta_kraken:+.3f}%", delta_color="normal")
-                ra4.metric("Non-Kraken Merkl change", f"{c_new['non_kraken_merkl']:.3f}%", delta=f"{delta_nk:+.3f}%", delta_color="inverse" if delta_nk < 0 else "normal")
+                ra1.metric("New Budget A", f"${a_new:.1f}K/wk", delta=f"{a_new - budget_a:+.1f}K", delta_color="inverse", help="Adjusted Campaign A weekly budget after reallocation.")
+                ra2.metric("New Budget B", f"${b_new:.1f}K/wk", delta=f"{b_new - budget_b:+.1f}K", delta_color="normal", help="Adjusted Campaign B weekly budget after reallocation.")
+                ra3.metric("Kraken Merkl change", f"{c_new['kraken_merkl']:.3f}%", delta=f"{delta_kraken:+.3f}%", delta_color="normal", help="Change in Kraken's combined incentive rate (A+B) from reallocation.")
+                ra4.metric("Non-Kraken Merkl change", f"{c_new['non_kraken_merkl']:.3f}%", delta=f"{delta_nk:+.3f}%", delta_color="inverse" if delta_nk < 0 else "normal", help="Change in non-Kraken incentive rate (A only) from reallocation.")
 
         st.divider()
 

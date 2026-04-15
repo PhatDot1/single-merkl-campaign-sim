@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environments
+.venv/
+venv/
+.conda/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (users bring their own)
+data/
+*.csv
+!examples/sample_data_template.csv
+
+# Output
+*.png
+*.pdf
+*.html
+output/
+reports/
+
+# Jupyter
+.ipynb_checkpoints/
