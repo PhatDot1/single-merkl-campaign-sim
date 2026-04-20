@@ -4,6 +4,7 @@ from pages.login import login
 from pages.logout import logout
 from pages.admin_panel import admin_panel
 from sim.dashboard.app5 import main as app5
+from sim.dashboard.kraken_split import main as kraken_split
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -16,6 +17,12 @@ home_page = st.Page(
     title="Homepage",
     icon=":material/home:",
     default=True,
+)
+
+kraken_split_page = st.Page(
+    kraken_split,
+    title="Kraken Split",
+    icon=":material/bolt:",
 )
 
 
@@ -34,6 +41,7 @@ if st.session_state.logged_in:
             "Homepage": [
                 # sentora_summary_page,
                 home_page,
+                kraken_split_page,
             ],
         }
     )

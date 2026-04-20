@@ -880,546 +880,541 @@ def make_spend_chart(
 # STREAMLIT PAGE
 # ============================================================================
 
-st.set_page_config(
-    page_title="Kraken Earn Split Incentive",
-    page_icon="⚡",
-    layout="wide",
-)
+def main():
+    # ── Header ──────────────────────────────────────────────────────────────────
+    st.title("⚡ Kraken Earn Split Incentive Dashboard")
+    st.caption(
+        "**Campaign A** — open to all depositors (Euler/Morpho vault) | "
+        "**Campaign B** — whitelisted to Kraken Earn address(es) only. "
+        "Kraken earns A + B. Non-Kraken earns A only. "
+        "Kraken TVL dilutes _both_ campaigns."
+    )
 
-# ── Header ──────────────────────────────────────────────────────────────────
-st.title("⚡ Kraken Earn Split Incentive Dashboard")
-st.caption(
-    "**Campaign A** — open to all depositors (Euler/Morpho vault) | "
-    "**Campaign B** — whitelisted to Kraken Earn address(es) only. "
-    "Kraken earns A + B. Non-Kraken earns A only. "
-    "Kraken TVL dilutes _both_ campaigns."
-)
+    # ── Live-data sidebar ────────────────────────────────────────────────────────
+    with st.sidebar:
+        st.header("Live Data")
+        refresh = st.button("🔄 Refresh on-chain data", use_container_width=True)
+        if refresh:
+            st.cache_data.clear()
 
-# ── Live-data sidebar ────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("Live Data")
-    refresh = st.button("🔄 Refresh on-chain data", use_container_width=True)
-    if refresh:
-        st.cache_data.clear()
-
-    st.caption("Fetches Kraken strategy TVLs, vault TVLs, and base APYs. Cached 5 min.")
-    st.divider()
-    st.subheader("Kraken Earn Addresses")
-    for key, addrs in KRAKEN_STRATEGY_ADDRS.items():
-        label = next((v.label for v in VENUES if v.key == key), key)
-        for a in addrs:
-            st.caption(f"**{label}**: `{a[:10]}…`")
-    for key, addr in CURVE_KRAKEN_LP_ADDRS.items():
-        if addr:
+        st.caption("Fetches Kraken strategy TVLs, vault TVLs, and base APYs. Cached 5 min.")
+        st.divider()
+        st.subheader("Kraken Earn Addresses")
+        for key, addrs in KRAKEN_STRATEGY_ADDRS.items():
             label = next((v.label for v in VENUES if v.key == key), key)
-            st.caption(f"**{label}**: `{addr[:10]}…`")
+            for a in addrs:
+                st.caption(f"**{label}**: `{a[:10]}…`")
+        for key, addr in CURVE_KRAKEN_LP_ADDRS.items():
+            if addr:
+                label = next((v.label for v in VENUES if v.key == key), key)
+                st.caption(f"**{label}**: `{addr[:10]}…`")
 
 
 
-min_kraken_merkl = KRAKEN_MIN_MERKL
+    min_kraken_merkl = KRAKEN_MIN_MERKL
 
-# ── Fetch live data (silent, with fallbacks) ─────────────────────────────────
-with st.spinner("Fetching live data…"):
-    try:
-        live_kraken = fetch_live_kraken_tvls()
-    except Exception:
-        live_kraken = {}
-    try:
-        live_vault = fetch_live_vault_tvls()
-    except Exception:
-        live_vault = {}
-    try:
-        live_base_apy = fetch_live_base_apys()
-    except Exception:
-        live_base_apy = {}
-    try:
-        euler_caps = fetch_euler_caps()
-    except Exception:
-        euler_caps = {}
+    # ── Fetch live data (silent, with fallbacks) ─────────────────────────────────
+    with st.spinner("Fetching live data…"):
+        try:
+            live_kraken = fetch_live_kraken_tvls()
+        except Exception:
+            live_kraken = {}
+        try:
+            live_vault = fetch_live_vault_tvls()
+        except Exception:
+            live_vault = {}
+        try:
+            live_base_apy = fetch_live_base_apys()
+        except Exception:
+            live_base_apy = {}
+        try:
+            euler_caps = fetch_euler_caps()
+        except Exception:
+            euler_caps = {}
 
-def _resolve_default(venue: VenueConfig, live_dict: dict, default_val: float) -> float:
-    val = live_dict.get(venue.key, 0.0)
-    return val / 1e6 if val > 0 else default_val  # live_vault comes in raw USD
-
-
-def _format_cap(cap_info: dict | None) -> str:
-    """Format Euler supply cap for the summary table."""
-    if not cap_info:
-        return "—"
-    if cap_info.get("supply_cap_usd", 0) == 0:
-        return "∞ (unlimited)" if cap_info.get("total_supply_usd", 0) > 0 else "—"
-    cap_m = cap_info["supply_cap_usd"] / 1e6
-    cur_m = cap_info["total_supply_usd"] / 1e6
-    pct = cur_m / cap_m * 100 if cap_m > 0 else 0
-    if cap_info.get("at_cap"):
-        return f"⚠ AT CAP ${cap_m:,.0f}M"
-    if pct >= 90:
-        return f"⚠ ${cap_m:,.0f}M ({pct:.0f}%)"
-    return f"${cap_m:,.0f}M ({pct:.0f}%)"
+    def _resolve_default(venue: VenueConfig, live_dict: dict, default_val: float) -> float:
+        val = live_dict.get(venue.key, 0.0)
+        return val / 1e6 if val > 0 else default_val  # live_vault comes in raw USD
 
 
-# ── Cross-venue summary table ─────────────────────────────────────────────────
-with st.expander("📊 Cross-venue summary", expanded=True):
-    summary_rows = []
-    for v in VENUES:
-        k_tvl = live_kraken.get(v.key, 0.0) / 1e6 if live_kraken.get(v.key, 0.0) > 0 else v.default_kraken_tvl_m
-        t_tvl = live_vault.get(v.key, 0.0) / 1e6 if live_vault.get(v.key, 0.0) > 0 else v.default_total_tvl_m
-        nk_tvl = max(t_tvl - k_tvl, 0.0)
-        base = live_base_apy.get(v.key, v.default_base_apy)
-        c = compute_rates(nk_tvl, k_tvl, v.default_budget_a, v.default_budget_b, v.default_rmax_a, v.default_rmax_b)
-        max_k = find_max_kraken_for_floor(nk_tvl, v.default_budget_a, v.default_budget_b, v.default_rmax_a, v.default_rmax_b, min_kraken_merkl)
-        hdroom = max(0.0, max_k - k_tvl)
-        summary_rows.append({
-            "Venue": v.label,
-            "Total TVL ($M)": f"${t_tvl:.1f}M",
-            "Kraken TVL ($M)": f"${k_tvl:.1f}M",
-            "Non-Kraken Merkl": f"{c['non_kraken_merkl']:.2f}%",
-            "Non-Kraken all-in": f"{c['non_kraken_merkl'] + base:.2f}%",
-            "Kraken Merkl (A+B)": f"{c['kraken_merkl']:.2f}%",
-            "Kraken all-in": f"{c['kraken_merkl'] + base:.2f}%",
-            "Total spend ($K/wk)": f"${c['total_spend']:.1f}K",
-            "Unspent ($K/wk)": f"${c['unspent']:.1f}K",
-            f"Kraken headroom (>{min_kraken_merkl:.1f}% Merkl)": f"+${hdroom:.1f}M",
-            "Supply Cap": _format_cap(euler_caps.get(v.key)),
-        })
-    import pandas as pd
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+    def _format_cap(cap_info: dict | None) -> str:
+        """Format Euler supply cap for the summary table."""
+        if not cap_info:
+            return "—"
+        if cap_info.get("supply_cap_usd", 0) == 0:
+            return "∞ (unlimited)" if cap_info.get("total_supply_usd", 0) > 0 else "—"
+        cap_m = cap_info["supply_cap_usd"] / 1e6
+        cur_m = cap_info["total_supply_usd"] / 1e6
+        pct = cur_m / cap_m * 100 if cap_m > 0 else 0
+        if cap_info.get("at_cap"):
+            return f"⚠ AT CAP ${cap_m:,.0f}M"
+        if pct >= 90:
+            return f"⚠ ${cap_m:,.0f}M ({pct:.0f}%)"
+        return f"${cap_m:,.0f}M ({pct:.0f}%)"
 
-st.divider()
 
-# ============================================================================
-# PER-VENUE PANELS
-# ============================================================================
+    # ── Cross-venue summary table ─────────────────────────────────────────────────
+    with st.expander("📊 Cross-venue summary", expanded=True):
+        summary_rows = []
+        for v in VENUES:
+            k_tvl = live_kraken.get(v.key, 0.0) / 1e6 if live_kraken.get(v.key, 0.0) > 0 else v.default_kraken_tvl_m
+            t_tvl = live_vault.get(v.key, 0.0) / 1e6 if live_vault.get(v.key, 0.0) > 0 else v.default_total_tvl_m
+            nk_tvl = max(t_tvl - k_tvl, 0.0)
+            base = live_base_apy.get(v.key, v.default_base_apy)
+            c = compute_rates(nk_tvl, k_tvl, v.default_budget_a, v.default_budget_b, v.default_rmax_a, v.default_rmax_b)
+            max_k = find_max_kraken_for_floor(nk_tvl, v.default_budget_a, v.default_budget_b, v.default_rmax_a, v.default_rmax_b, min_kraken_merkl)
+            hdroom = max(0.0, max_k - k_tvl)
+            summary_rows.append({
+                "Venue": v.label,
+                "Total TVL ($M)": f"${t_tvl:.1f}M",
+                "Kraken TVL ($M)": f"${k_tvl:.1f}M",
+                "Non-Kraken Merkl": f"{c['non_kraken_merkl']:.2f}%",
+                "Non-Kraken all-in": f"{c['non_kraken_merkl'] + base:.2f}%",
+                "Kraken Merkl (A+B)": f"{c['kraken_merkl']:.2f}%",
+                "Kraken all-in": f"{c['kraken_merkl'] + base:.2f}%",
+                "Total spend ($K/wk)": f"${c['total_spend']:.1f}K",
+                "Unspent ($K/wk)": f"${c['unspent']:.1f}K",
+                f"Kraken headroom (>{min_kraken_merkl:.1f}% Merkl)": f"+${hdroom:.1f}M",
+                "Supply Cap": _format_cap(euler_caps.get(v.key)),
+            })
+        import pandas as pd
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
-for venue in VENUES:
-    with st.expander(f"**{venue.label}**", expanded=True):
+    st.divider()
 
-        # ── Resolve live defaults ─────────────────────────────────────────
-        live_k_usd = live_kraken.get(venue.key, 0.0)
-        live_t_usd = live_vault.get(venue.key, 0.0)
-        init_kraken_m = live_k_usd / 1e6 if live_k_usd > 0 else venue.default_kraken_tvl_m
-        init_total_m  = live_t_usd / 1e6 if live_t_usd > 0 else venue.default_total_tvl_m
-        init_nk_m = max(init_total_m - init_kraken_m, 0.0)
-        init_base_apy = live_base_apy.get(venue.key, venue.default_base_apy)
+    # ============================================================================
+    # PER-VENUE PANELS
+    # ============================================================================
 
-        k = venue.key
+    for venue in VENUES:
+        with st.expander(f"**{venue.label}**", expanded=True):
 
-        # ── Build state keys ──────────────────────────────────────────────
-        if f"{k}_init" not in st.session_state:
-            st.session_state[f"{k}_nk_tvl"]   = float(init_nk_m)
-            st.session_state[f"{k}_k_tvl"]    = float(init_kraken_m)
-            st.session_state[f"{k}_budg_a"]   = float(venue.default_budget_a)
-            st.session_state[f"{k}_budg_b"]   = float(venue.default_budget_b)
-            st.session_state[f"{k}_rmax_a"]   = float(venue.default_rmax_a)
-            st.session_state[f"{k}_rmax_b"]   = float(venue.default_rmax_b)
-            st.session_state[f"{k}_base_apy"] = float(init_base_apy)
-            st.session_state[f"{k}_mode_a"]   = "Set budget ($K/wk)"
-            st.session_state[f"{k}_mode_b"]   = "Set budget ($K/wk)"
-            st.session_state[f"{k}_init"]     = True
+            # ── Resolve live defaults ─────────────────────────────────────────
+            live_k_usd = live_kraken.get(venue.key, 0.0)
+            live_t_usd = live_vault.get(venue.key, 0.0)
+            init_kraken_m = live_k_usd / 1e6 if live_k_usd > 0 else venue.default_kraken_tvl_m
+            init_total_m  = live_t_usd / 1e6 if live_t_usd > 0 else venue.default_total_tvl_m
+            init_nk_m = max(init_total_m - init_kraken_m, 0.0)
+            init_base_apy = live_base_apy.get(venue.key, venue.default_base_apy)
 
-        # ── Row 0: live data status bar ───────────────────────────────────
-        data_cols = st.columns([3, 3, 3, 1])
-        if live_k_usd > 0:
-            data_cols[0].success(f"Live Kraken TVL: ${live_k_usd/1e6:.2f}M", icon="🟢")
-        else:
-            data_cols[0].info(f"Default Kraken TVL: ${venue.default_kraken_tvl_m:.1f}M", icon="📌")
-        if live_t_usd > 0:
-            data_cols[1].success(f"Live vault TVL: ${live_t_usd/1e6:.2f}M", icon="🟢")
-        else:
-            data_cols[1].info(f"Default vault TVL: ${venue.default_total_tvl_m:.1f}M", icon="📌")
-        if venue.key in live_base_apy:
-            data_cols[2].success(f"Live base APY: {live_base_apy[venue.key]:.2f}%", icon="🟢")
-        else:
-            data_cols[2].info(f"Default base APY: {venue.default_base_apy:.2f}%", icon="📌")
+            k = venue.key
 
-        # ── Euler supply cap banner ───────────────────────────────────────
-        cap_info = euler_caps.get(venue.key)
-        if cap_info and cap_info["supply_cap_usd"] > 0:
-            cap_m = cap_info["supply_cap_usd"] / 1e6
-            current_m = (cap_info["total_supply_usd"] / 1e6) if cap_info["total_supply_usd"] > 0 else init_total_m
-            headroom_cap = cap_m - current_m
-            utilisation_pct = (current_m / cap_m * 100) if cap_m > 0 else 0
-            if headroom_cap <= 0:
-                st.error(
-                    f"🚫 **Euler supply cap reached!** Cap: ${cap_m:,.1f}M — "
-                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised). "
-                    f"To facilitate growth, increase Euler cap by at least **${abs(headroom_cap) + 10:,.0f}M** "
-                    f"to **${cap_m + abs(headroom_cap) + 10:,.0f}M**.",
-                    icon="🔴",
-                )
-            elif headroom_cap < 20:
-                st.warning(
-                    f"⚠️ **Euler supply cap is tight.** Cap: ${cap_m:,.1f}M — "
-                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
-                    f"${headroom_cap:,.1f}M remaining). "
-                    f"To accommodate further growth, increase Euler cap to at least **${current_m + 50:,.0f}M**.",
-                    icon="⚠️",
-                )
+            # ── Build state keys ──────────────────────────────────────────────
+            if f"{k}_init" not in st.session_state:
+                st.session_state[f"{k}_nk_tvl"]   = float(init_nk_m)
+                st.session_state[f"{k}_k_tvl"]    = float(init_kraken_m)
+                st.session_state[f"{k}_budg_a"]   = float(venue.default_budget_a)
+                st.session_state[f"{k}_budg_b"]   = float(venue.default_budget_b)
+                st.session_state[f"{k}_rmax_a"]   = float(venue.default_rmax_a)
+                st.session_state[f"{k}_rmax_b"]   = float(venue.default_rmax_b)
+                st.session_state[f"{k}_base_apy"] = float(init_base_apy)
+                st.session_state[f"{k}_mode_a"]   = "Set budget ($K/wk)"
+                st.session_state[f"{k}_mode_b"]   = "Set budget ($K/wk)"
+                st.session_state[f"{k}_init"]     = True
+
+            # ── Row 0: live data status bar ───────────────────────────────────
+            data_cols = st.columns([3, 3, 3, 1])
+            if live_k_usd > 0:
+                data_cols[0].success(f"Live Kraken TVL: ${live_k_usd/1e6:.2f}M", icon="🟢")
             else:
-                st.success(
-                    f"Euler supply cap: ${cap_m:,.1f}M — "
-                    f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
-                    f"${headroom_cap:,.1f}M headroom)",
-                    icon="✅",
-                )
-
-        st.divider()
-
-        # ── Row 1: Input columns ──────────────────────────────────────────
-        col_tvl, col_a, col_b = st.columns([1.2, 1.4, 1.4])
-
-        with col_tvl:
-            st.markdown("##### TVL inputs ($M)")
-            nk_tvl = st.slider(
-                "Non-Kraken TVL ($M)",
-                min_value=0.0, max_value=1_500.0, step=1.0,
-                value=float(st.session_state[f"{k}_nk_tvl"]),
-                key=f"{k}_nk_tvl_slider",
-                help="TVL from non-Kraken depositors. This is Total TVL minus Kraken TVL.",
-            )
-            k_tvl = st.slider(
-                "Kraken Earn TVL ($M)",
-                min_value=0.0, max_value=1_000.0, step=1.0,
-                value=float(st.session_state[f"{k}_k_tvl"]),
-                key=f"{k}_k_tvl_slider",
-                help="Kraken Earn strategy deposits. Dilutes both Campaign A (part of total TVL) and Campaign B (direct denominator).",
-            )
-            base_apy = st.number_input(
-                "Base organic APY (%)",
-                min_value=0.0, max_value=20.0, step=0.05, format="%.2f",
-                value=float(st.session_state[f"{k}_base_apy"]),
-                key=f"{k}_base_apy_input",
-                help="Organic yield from borrowers, before any Merkl incentives.",
-            )
-
-        # ── Campaign A ────────────────────────────────────────────────────
-        with col_a:
-            st.markdown("##### Campaign A — all depositors")
-            mode_a = st.radio(
-                "Input mode",
-                ["Set budget ($K/wk)", "Set target rate (%)"],
-                horizontal=True,
-                key=f"{k}_mode_a_radio",
-                index=["Set budget ($K/wk)", "Set target rate (%)"].index(
-                    st.session_state[f"{k}_mode_a"]
-                ),
-                help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
-            )
-            st.session_state[f"{k}_mode_a"] = mode_a
-
-            _rmax_a_max = max(15.0, float(st.session_state[f"{k}_rmax_a"]) * 1.5)
-            rmax_a = st.slider(
-                "Rmax A (cap, %/yr)",
-                min_value=0.1, max_value=_rmax_a_max, step=0.1, format="%.1f",
-                value=float(st.session_state[f"{k}_rmax_a"]),
-                key=f"{k}_rmax_a_slider",
-                help="Maximum incentive APR Campaign A will pay. Set very high for pure-float (no cap). Budget underspends when rate hits this cap.",
-            )
-
-            total_tvl = nk_tvl + k_tvl  # $M
-            if mode_a == "Set budget ($K/wk)":
-                budget_a = st.slider(
-                    "Budget A ($K/wk)",
-                    min_value=0.0, max_value=1_000.0, step=0.5, format="%.1f",
-                    value=float(st.session_state[f"{k}_budg_a"]),
-                    key=f"{k}_budg_a_slider",
-                    help="Weekly budget for Campaign A distributed pro-rata to all depositors (Kraken + non-Kraken).",
-                )
-                # Show implied rate
-                if total_tvl > 0:
-                    impl_rate_a = min(rmax_a, budget_a * 52 / (total_tvl * 1_000) * 100)
-                    st.caption(f"→ Implied rate A: **{impl_rate_a:.3f}%**")
+                data_cols[0].info(f"Default Kraken TVL: ${venue.default_kraken_tvl_m:.1f}M", icon="📌")
+            if live_t_usd > 0:
+                data_cols[1].success(f"Live vault TVL: ${live_t_usd/1e6:.2f}M", icon="🟢")
             else:
-                # Rate → budget
-                target_rate_a = st.slider(
-                    "Target rate A (%/yr)",
-                    min_value=0.01, max_value=rmax_a, step=0.05, format="%.2f",
-                    value=min(float(st.session_state[f"{k}_budg_a"] * 52 / (total_tvl * 1_000) * 100) if total_tvl > 0 else 1.0, rmax_a),
-                    key=f"{k}_rate_a_target",
-                    help="Desired Campaign A annual incentive rate. Budget is computed to achieve this rate at current TVL.",
-                )
-                budget_a = budget_for_target_rate(target_rate_a, total_tvl, rmax_a)
-                st.caption(f"→ Required budget: **${budget_a:.1f}K/wk**")
-
-        # ── Campaign B ────────────────────────────────────────────────────
-        with col_b:
-            st.markdown("##### Campaign B — Kraken Earn only")
-            mode_b = st.radio(
-                "Input mode",
-                ["Set budget ($K/wk)", "Set target rate (%)"],
-                horizontal=True,
-                key=f"{k}_mode_b_radio",
-                index=["Set budget ($K/wk)", "Set target rate (%)"].index(
-                    st.session_state[f"{k}_mode_b"]
-                ),
-                help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
-            )
-            st.session_state[f"{k}_mode_b"] = mode_b
-
-            rmax_b = st.slider(
-                "Rmax B (cap, %/yr)",
-                min_value=0.0, max_value=10.0, step=0.1, format="%.1f",
-                value=float(st.session_state[f"{k}_rmax_b"]),
-                key=f"{k}_rmax_b_slider",
-                help="Keep low (0.8–1.0%) so rate is stable over a wide range of Kraken TVL.",
-            )
-
-            if mode_b == "Set budget ($K/wk)":
-                budget_b = st.slider(
-                    "Budget B ($K/wk)",
-                    min_value=0.0, max_value=200.0, step=0.5, format="%.1f",
-                    value=float(st.session_state[f"{k}_budg_b"]),
-                    key=f"{k}_budg_b_slider",
-                    help="Weekly budget for Campaign B distributed only to whitelisted Kraken Earn address(es).",
-                )
-                if k_tvl > 0 and rmax_b > 0:
-                    impl_rate_b = min(rmax_b, budget_b * 52 / (k_tvl * 1_000) * 100)
-                    st.caption(f"→ Implied rate B: **{impl_rate_b:.3f}%**")
+                data_cols[1].info(f"Default vault TVL: ${venue.default_total_tvl_m:.1f}M", icon="📌")
+            if venue.key in live_base_apy:
+                data_cols[2].success(f"Live base APY: {live_base_apy[venue.key]:.2f}%", icon="🟢")
             else:
-                target_rate_b = st.slider(
-                    "Target rate B (%/yr)",
-                    min_value=0.0, max_value=max(rmax_b, 0.01), step=0.05, format="%.2f",
-                    value=min(
-                        float(st.session_state[f"{k}_budg_b"] * 52 / (k_tvl * 1_000) * 100) if k_tvl > 0 else 0.5,
-                        rmax_b if rmax_b > 0 else 1.0,
+                data_cols[2].info(f"Default base APY: {venue.default_base_apy:.2f}%", icon="📌")
+
+            # ── Euler supply cap banner ───────────────────────────────────────
+            cap_info = euler_caps.get(venue.key)
+            if cap_info and cap_info["supply_cap_usd"] > 0:
+                cap_m = cap_info["supply_cap_usd"] / 1e6
+                current_m = (cap_info["total_supply_usd"] / 1e6) if cap_info["total_supply_usd"] > 0 else init_total_m
+                headroom_cap = cap_m - current_m
+                utilisation_pct = (current_m / cap_m * 100) if cap_m > 0 else 0
+                if headroom_cap <= 0:
+                    st.error(
+                        f"🚫 **Euler supply cap reached!** Cap: ${cap_m:,.1f}M — "
+                        f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised). "
+                        f"To facilitate growth, increase Euler cap by at least **${abs(headroom_cap) + 10:,.0f}M** "
+                        f"to **${cap_m + abs(headroom_cap) + 10:,.0f}M**.",
+                        icon="🔴",
+                    )
+                elif headroom_cap < 20:
+                    st.warning(
+                        f"⚠️ **Euler supply cap is tight.** Cap: ${cap_m:,.1f}M — "
+                        f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
+                        f"${headroom_cap:,.1f}M remaining). "
+                        f"To accommodate further growth, increase Euler cap to at least **${current_m + 50:,.0f}M**.",
+                        icon="⚠️",
+                    )
+                else:
+                    st.success(
+                        f"Euler supply cap: ${cap_m:,.1f}M — "
+                        f"Current: ${current_m:,.1f}M ({utilisation_pct:.0f}% utilised, "
+                        f"${headroom_cap:,.1f}M headroom)",
+                        icon="✅",
+                    )
+
+            st.divider()
+
+            # ── Row 1: Input columns ──────────────────────────────────────────
+            col_tvl, col_a, col_b = st.columns([1.2, 1.4, 1.4])
+
+            with col_tvl:
+                st.markdown("##### TVL inputs ($M)")
+                nk_tvl = st.slider(
+                    "Non-Kraken TVL ($M)",
+                    min_value=0.0, max_value=1_500.0, step=1.0,
+                    value=float(st.session_state[f"{k}_nk_tvl"]),
+                    key=f"{k}_nk_tvl_slider",
+                    help="TVL from non-Kraken depositors. This is Total TVL minus Kraken TVL.",
+                )
+                k_tvl = st.slider(
+                    "Kraken Earn TVL ($M)",
+                    min_value=0.0, max_value=1_000.0, step=1.0,
+                    value=float(st.session_state[f"{k}_k_tvl"]),
+                    key=f"{k}_k_tvl_slider",
+                    help="Kraken Earn strategy deposits. Dilutes both Campaign A (part of total TVL) and Campaign B (direct denominator).",
+                )
+                base_apy = st.number_input(
+                    "Base organic APY (%)",
+                    min_value=0.0, max_value=20.0, step=0.05, format="%.2f",
+                    value=float(st.session_state[f"{k}_base_apy"]),
+                    key=f"{k}_base_apy_input",
+                    help="Organic yield from borrowers, before any Merkl incentives.",
+                )
+
+            # ── Campaign A ────────────────────────────────────────────────────
+            with col_a:
+                st.markdown("##### Campaign A — all depositors")
+                mode_a = st.radio(
+                    "Input mode",
+                    ["Set budget ($K/wk)", "Set target rate (%)"],
+                    horizontal=True,
+                    key=f"{k}_mode_a_radio",
+                    index=["Set budget ($K/wk)", "Set target rate (%)"].index(
+                        st.session_state[f"{k}_mode_a"]
                     ),
-                    key=f"{k}_rate_b_target",
-                    help="Desired Campaign B annual incentive rate. Budget is computed to achieve this rate at current Kraken TVL.",
+                    help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
                 )
-                budget_b = budget_for_target_rate(target_rate_b, k_tvl, rmax_b)
-                st.caption(f"→ Required budget: **${budget_b:.1f}K/wk**")
+                st.session_state[f"{k}_mode_a"] = mode_a
 
-        # ── Compute current state ──────────────────────────────────────────
-        c = compute_rates(nk_tvl, k_tvl, budget_a, budget_b, rmax_a, rmax_b)
-        non_kraken_allin = c["non_kraken_merkl"] + base_apy
-        kraken_allin = c["kraken_merkl"] + base_apy
-        floor_breached = (venue.floor_apy is not None) and (non_kraken_allin < venue.floor_apy)
-
-        breakeven_b_m = c["breakeven_b_m"]
-        headroom_b = max(0.0, breakeven_b_m - k_tvl)
-        max_kraken_for_floor = find_max_kraken_for_floor(
-            nk_tvl, budget_a, budget_b, rmax_a, rmax_b, min_kraken_merkl
-        )
-        additional_before_3p5 = max(0.0, max_kraken_for_floor - k_tvl)
-
-        st.divider()
-
-        # ── Row 2: Key rate metrics ────────────────────────────────────────
-        m1, m2, m3, m4 = st.columns(4)
-
-        with m1:
-            color_nk = "inverse" if floor_breached else "normal"
-            st.metric(
-                "Non-Kraken Merkl",
-                f"{c['non_kraken_merkl']:.3f}%",
-                help="Campaign A effective rate for external depositors.",
-            )
-            st.metric(
-                "Non-Kraken all-in APY",
-                f"{non_kraken_allin:.2f}%",
-                delta=f"{'⚠ BELOW FLOOR' if floor_breached else ''}",
-                delta_color="inverse" if floor_breached else "off",
-                help="Base APY + Merkl incentive rate for non-Kraken depositors.",
-            )
-            if floor_breached:
-                st.error(f"Below {venue.floor_label or 'floor'} ({venue.floor_apy:.1f}%)!", icon="🔴")
-
-        with m2:
-            st.metric(
-                "Kraken Merkl (A+B)",
-                f"{c['kraken_merkl']:.3f}%",
-                help="Combined effective incentive rate for Kraken Earn.",
-            )
-            st.metric(
-                "Kraken all-in APY",
-                f"{kraken_allin:.2f}%",
-                help="Base APY + Campaign A + Campaign B combined incentive rate for Kraken Earn.",
-            )
-
-        with m3:
-            st.metric("Campaign A rate", f"{c['rate_a']:.3f}%",
-                      delta="at cap" if c["at_cap_a"] else "below cap",
-                      delta_color="off",
-                      help="Effective Campaign A incentive rate. 'At cap' means Rmax A has been reached and budget is underspent.")
-            st.metric("Campaign B rate", f"{c['rate_b']:.3f}%",
-                      delta="at cap" if c["at_cap_b"] else "below cap",
-                      delta_color="off",
-                      help="Effective Campaign B incentive rate (Kraken only). 'At cap' means Rmax B has been reached.")
-
-        with m4:
-            st.metric(
-                "Total spend (A+B)",
-                f"${c['total_spend']:.1f}K/wk",
-                delta=f"-${c['unspent']:.1f}K unspent" if c["unspent"] > 0.5 else "fully deployed",
-                delta_color="normal" if c["unspent"] > 0.5 else "off",
-                help="Combined weekly spend across both campaigns. Unspent means rate cap was hit before budget was exhausted.",
-            )
-            st.metric(
-                "Annualised cost",
-                f"${(c['total_spend'] * 52 / 1_000):.2f}M/yr",
-                help="Total spend extrapolated to annual cost (spend × 52 weeks).",
-            )
-
-        st.divider()
-
-        # ── Row 3: Capacity metrics ────────────────────────────────────────
-        cap1, cap2, cap3, cap4 = st.columns(4)
-
-        cap1.metric(
-            "Campaign B breakeven TVL",
-            f"${breakeven_b_m:.1f}M",
-            help="Kraken TVL at which Campaign B rate starts compressing below Rmax B.",
-        )
-        cap2.metric(
-            "Headroom before B compresses",
-            f"+${headroom_b:.1f}M",
-            delta="⚠ tightening" if 5 < headroom_b <= 20 else ("⚠ at cap" if headroom_b <= 5 else ""),
-            delta_color="off" if headroom_b > 20 else ("off" if headroom_b > 5 else "inverse"),
-            help="How much more Kraken TVL can grow before Campaign B rate compresses below Rmax B.",
-        )
-        cap3.metric(
-            f"Max Kraken TVL >{min_kraken_merkl:.1f}% Merkl",
-            f"${max_kraken_for_floor:.1f}M",
-            help=f"Maximum Kraken TVL before combined Merkl rate drops below {min_kraken_merkl:.1f}%.",
-        )
-        cap4.metric(
-            "Additional Kraken capacity",
-            f"+${additional_before_3p5:.1f}M",
-            delta="⚠ moderate" if 20 < additional_before_3p5 <= 50 else ("⚠ limited" if additional_before_3p5 <= 20 else ""),
-            delta_color="off" if additional_before_3p5 > 50 else ("off" if additional_before_3p5 > 20 else "inverse"),
-            help=f"How much more Kraken TVL can be added before combined Merkl rate drops below {min_kraken_merkl:.1f}%.",
-        )
-
-        # ── Euler cap vs scenario TVL check ───────────────────────────────
-        if cap_info and cap_info["supply_cap_usd"] > 0:
-            cap_m = cap_info["supply_cap_usd"] / 1e6
-            scenario_tvl = nk_tvl + k_tvl  # slider TVL ($M)
-            if scenario_tvl > cap_m:
-                needed = scenario_tvl - cap_m
-                st.error(
-                    f"🚫 Scenario TVL (${scenario_tvl:.0f}M) exceeds Euler supply cap (${cap_m:,.0f}M). "
-                    f"**Increase Euler cap by ${needed:,.0f}M to ${scenario_tvl:,.0f}M** to support this scenario.",
-                    icon="🔴",
-                )
-            elif (cap_m - scenario_tvl) < 20:
-                st.warning(
-                    f"⚠️ Scenario TVL (${scenario_tvl:.0f}M) is within ${cap_m - scenario_tvl:,.1f}M of "
-                    f"Euler supply cap (${cap_m:,.0f}M). Consider increasing cap to **${scenario_tvl + 50:,.0f}M**.",
-                    icon="⚠️",
+                _rmax_a_max = max(15.0, float(st.session_state[f"{k}_rmax_a"]) * 1.5)
+                rmax_a = st.slider(
+                    "Rmax A (cap, %/yr)",
+                    min_value=0.1, max_value=_rmax_a_max, step=0.1, format="%.1f",
+                    value=float(st.session_state[f"{k}_rmax_a"]),
+                    key=f"{k}_rmax_a_slider",
+                    help="Maximum incentive APR Campaign A will pay. Set very high for pure-float (no cap). Budget underspends when rate hits this cap.",
                 )
 
-        # ── Row 4: Detailed breakdown ─────────────────────────────────────
-        with st.expander("Detailed breakdown", expanded=False):
-            d1, d2 = st.columns(2)
-            with d1:
-                st.markdown("**Campaign A**")
-                st.markdown(
-                    f"- Weekly budget: **${budget_a:.1f}K**\n"
-                    f"- Annual budget: **${budget_a * 52 / 1_000:.2f}M**\n"
-                    f"- Total TVL (A denominator): **${c['total_tvl_m']:.1f}M**\n"
-                    f"- Raw rate (no cap): **{budget_a * 52 / (c['total_tvl_m'] * 1_000) * 100:.3f}%**\n"
-                    f"- Rmax A cap: **{rmax_a:.2f}%**\n"
-                    f"- Effective rate A: **{c['rate_a']:.3f}%** {'(capped)' if c['at_cap_a'] else '(uncapped)'}\n"
-                    f"- Actual spend A: **${c['spend_a']:.2f}K/wk** (of ${budget_a:.1f}K budget)"
-                )
-            with d2:
-                st.markdown("**Campaign B**")
-                st.markdown(
-                    f"- Weekly budget: **${budget_b:.1f}K**\n"
-                    f"- Annual budget: **${budget_b * 52 / 1_000:.2f}M**\n"
-                    f"- Kraken TVL (B denominator): **${k_tvl:.1f}M**\n"
-                    f"- Raw rate (no cap): **{budget_b * 52 / (k_tvl * 1_000) * 100 if k_tvl > 0 else 0:.3f}%**\n"
-                    f"- Rmax B cap: **{rmax_b:.2f}%**\n"
-                    f"- Effective rate B: **{c['rate_b']:.3f}%** {'(capped)' if c['at_cap_b'] else '(uncapped)'}\n"
-                    f"- Actual spend B: **${c['spend_b']:.2f}K/wk** (of ${budget_b:.1f}K budget)\n"
-                    f"- Breakeven Kraken TVL: **${breakeven_b_m:.1f}M** "
-                    f"(BudgetB × 52 / Rmax B = ${budget_b:.1f}K × 52 / {rmax_b:.2f}%)"
-                )
-
-        # ── Row 5: Scenario explorer ──────────────────────────────────────
-        with st.expander("📈 Rate curve — Kraken TVL sweep", expanded=True):
-            chart_tabs = st.tabs(["Rate vs Kraken TVL", "Spend vs Kraken TVL"])
-            with chart_tabs[0]:
-                try:
-                    fig = make_rate_chart(
-                        venue, nk_tvl, budget_a, budget_b, rmax_a, rmax_b, base_apy, k_tvl
+                total_tvl = nk_tvl + k_tvl  # $M
+                if mode_a == "Set budget ($K/wk)":
+                    budget_a = st.slider(
+                        "Budget A ($K/wk)",
+                        min_value=0.0, max_value=1_000.0, step=0.5, format="%.1f",
+                        value=float(st.session_state[f"{k}_budg_a"]),
+                        key=f"{k}_budg_a_slider",
+                        help="Weekly budget for Campaign A distributed pro-rata to all depositors (Kraken + non-Kraken).",
                     )
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"Chart error: {e}")
-            with chart_tabs[1]:
-                try:
-                    fig2 = make_spend_chart(
-                        venue, nk_tvl, budget_a, budget_b, rmax_a, rmax_b, k_tvl
+                    # Show implied rate
+                    if total_tvl > 0:
+                        impl_rate_a = min(rmax_a, budget_a * 52 / (total_tvl * 1_000) * 100)
+                        st.caption(f"→ Implied rate A: **{impl_rate_a:.3f}%**")
+                else:
+                    # Rate → budget
+                    target_rate_a = st.slider(
+                        "Target rate A (%/yr)",
+                        min_value=0.01, max_value=rmax_a, step=0.05, format="%.2f",
+                        value=min(float(st.session_state[f"{k}_budg_a"] * 52 / (total_tvl * 1_000) * 100) if total_tvl > 0 else 1.0, rmax_a),
+                        key=f"{k}_rate_a_target",
+                        help="Desired Campaign A annual incentive rate. Budget is computed to achieve this rate at current TVL.",
                     )
-                    st.plotly_chart(fig2, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"Chart error: {e}")
+                    budget_a = budget_for_target_rate(target_rate_a, total_tvl, rmax_a)
+                    st.caption(f"→ Required budget: **${budget_a:.1f}K/wk**")
 
-        # ── Row 6: What-if Kraken TVL growth table ────────────────────────
-        with st.expander("📋 What-if: Kraken TVL growth scenarios", expanded=False):
-            steps = [0, 10, 25, 50, 75, 100, 150, 200, 300, 500]
-            rows = []
-            for delta_k in steps:
-                k_test = k_tvl + delta_k
-                ct = compute_rates(nk_tvl, k_test, budget_a, budget_b, rmax_a, rmax_b)
-                rows.append({
-                    "+Δ Kraken ($M)": f"+${delta_k}M",
-                    "Kraken TVL ($M)": f"${k_test:.0f}M",
-                    "Rate A (%)": f"{ct['rate_a']:.3f}%",
-                    "Rate B (%)": f"{ct['rate_b']:.3f}%",
-                    "Kraken Merkl": f"{ct['kraken_merkl']:.3f}%",
-                    "Kraken all-in": f"{ct['kraken_merkl'] + base_apy:.2f}%",
-                    "Non-Kraken Merkl": f"{ct['non_kraken_merkl']:.3f}%",
-                    "Non-Kraken all-in": f"{ct['non_kraken_merkl'] + base_apy:.2f}%",
-                    "Spend A ($K/wk)": f"${ct['spend_a']:.1f}",
-                    "Spend B ($K/wk)": f"${ct['spend_b']:.1f}",
-                    "Total Spend ($K/wk)": f"${ct['total_spend']:.1f}",
-                    "B at cap?": "✓" if ct["at_cap_b"] else "",
-                    f"Kraken >{min_kraken_merkl:.1f}%?": "✓" if ct["kraken_merkl"] >= min_kraken_merkl else "⚠",
-                })
-            import pandas as pd
-            df = pd.DataFrame(rows)
-            # Highlight rows where Kraken drops below floor
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # ── Row 7: Budget re-allocation helper ─────────────────────────────
-        with st.expander("💡 Budget re-allocation calculator", expanded=False):
-            st.markdown(
-                "Redirect budget from Campaign A to Campaign B while keeping "
-                "total spend flat. Shows the impact of each shift."
-            )
-            total_budget_fixed = budget_a + budget_b
-            shift_cols = st.columns([2, 3])
-            with shift_cols[0]:
-                b_new = st.slider(
-                    "Budget B (after shift) ($K/wk)",
-                    min_value=0.0, max_value=float(total_budget_fixed),
-                    step=0.5, value=float(budget_b),
-                    key=f"{k}_realloc_b",
-                    help="Increase B, decrease A proportionally. Total held constant.",
+            # ── Campaign B ────────────────────────────────────────────────────
+            with col_b:
+                st.markdown("##### Campaign B — Kraken Earn only")
+                mode_b = st.radio(
+                    "Input mode",
+                    ["Set budget ($K/wk)", "Set target rate (%)"],
+                    horizontal=True,
+                    key=f"{k}_mode_b_radio",
+                    index=["Set budget ($K/wk)", "Set target rate (%)"].index(
+                        st.session_state[f"{k}_mode_b"]
+                    ),
+                    help="Budget mode: set weekly spend directly. Target mode: set desired APR and compute required budget.",
                 )
-            a_new = total_budget_fixed - b_new
-            with shift_cols[1]:
-                c_new = compute_rates(nk_tvl, k_tvl, a_new, b_new, rmax_a, rmax_b)
-                delta_kraken = c_new["kraken_merkl"] - c["kraken_merkl"]
-                delta_nk = c_new["non_kraken_merkl"] - c["non_kraken_merkl"]
-                ra1, ra2, ra3, ra4 = st.columns(4)
-                ra1.metric("New Budget A", f"${a_new:.1f}K/wk", delta=f"{a_new - budget_a:+.1f}K", delta_color="inverse", help="Adjusted Campaign A weekly budget after reallocation.")
-                ra2.metric("New Budget B", f"${b_new:.1f}K/wk", delta=f"{b_new - budget_b:+.1f}K", delta_color="normal", help="Adjusted Campaign B weekly budget after reallocation.")
-                ra3.metric("Kraken Merkl change", f"{c_new['kraken_merkl']:.3f}%", delta=f"{delta_kraken:+.3f}%", delta_color="normal", help="Change in Kraken's combined incentive rate (A+B) from reallocation.")
-                ra4.metric("Non-Kraken Merkl change", f"{c_new['non_kraken_merkl']:.3f}%", delta=f"{delta_nk:+.3f}%", delta_color="inverse" if delta_nk < 0 else "normal", help="Change in non-Kraken incentive rate (A only) from reallocation.")
+                st.session_state[f"{k}_mode_b"] = mode_b
 
-        st.divider()
+                rmax_b = st.slider(
+                    "Rmax B (cap, %/yr)",
+                    min_value=0.0, max_value=10.0, step=0.1, format="%.1f",
+                    value=float(st.session_state[f"{k}_rmax_b"]),
+                    key=f"{k}_rmax_b_slider",
+                    help="Keep low (0.8–1.0%) so rate is stable over a wide range of Kraken TVL.",
+                )
 
-# ============================================================================
-# FOOTER
-# ============================================================================
-st.markdown("---")
-st.caption(
-    "All rates are % APY.  TVL inputs in $M.  Budget inputs in $K/week.  "
-    "Base APY is organic yield from borrowers before incentives.  "
-    "Kraken TVL dilutes **both** Campaign A (via total TVL denominator) "
-    "and Campaign B (directly, as its sole denominator).  "
-    "On-chain data cached 5 minutes.  Updated: " + time.strftime("%Y-%m-%d %H:%M UTC")
-)
+                if mode_b == "Set budget ($K/wk)":
+                    budget_b = st.slider(
+                        "Budget B ($K/wk)",
+                        min_value=0.0, max_value=200.0, step=0.5, format="%.1f",
+                        value=float(st.session_state[f"{k}_budg_b"]),
+                        key=f"{k}_budg_b_slider",
+                        help="Weekly budget for Campaign B distributed only to whitelisted Kraken Earn address(es).",
+                    )
+                    if k_tvl > 0 and rmax_b > 0:
+                        impl_rate_b = min(rmax_b, budget_b * 52 / (k_tvl * 1_000) * 100)
+                        st.caption(f"→ Implied rate B: **{impl_rate_b:.3f}%**")
+                else:
+                    target_rate_b = st.slider(
+                        "Target rate B (%/yr)",
+                        min_value=0.0, max_value=max(rmax_b, 0.01), step=0.05, format="%.2f",
+                        value=min(
+                            float(st.session_state[f"{k}_budg_b"] * 52 / (k_tvl * 1_000) * 100) if k_tvl > 0 else 0.5,
+                            rmax_b if rmax_b > 0 else 1.0,
+                        ),
+                        key=f"{k}_rate_b_target",
+                        help="Desired Campaign B annual incentive rate. Budget is computed to achieve this rate at current Kraken TVL.",
+                    )
+                    budget_b = budget_for_target_rate(target_rate_b, k_tvl, rmax_b)
+                    st.caption(f"→ Required budget: **${budget_b:.1f}K/wk**")
+
+            # ── Compute current state ──────────────────────────────────────────
+            c = compute_rates(nk_tvl, k_tvl, budget_a, budget_b, rmax_a, rmax_b)
+            non_kraken_allin = c["non_kraken_merkl"] + base_apy
+            kraken_allin = c["kraken_merkl"] + base_apy
+            floor_breached = (venue.floor_apy is not None) and (non_kraken_allin < venue.floor_apy)
+
+            breakeven_b_m = c["breakeven_b_m"]
+            headroom_b = max(0.0, breakeven_b_m - k_tvl)
+            max_kraken_for_floor = find_max_kraken_for_floor(
+                nk_tvl, budget_a, budget_b, rmax_a, rmax_b, min_kraken_merkl
+            )
+            additional_before_3p5 = max(0.0, max_kraken_for_floor - k_tvl)
+
+            st.divider()
+
+            # ── Row 2: Key rate metrics ────────────────────────────────────────
+            m1, m2, m3, m4 = st.columns(4)
+
+            with m1:
+                color_nk = "inverse" if floor_breached else "normal"
+                st.metric(
+                    "Non-Kraken Merkl",
+                    f"{c['non_kraken_merkl']:.3f}%",
+                    help="Campaign A effective rate for external depositors.",
+                )
+                st.metric(
+                    "Non-Kraken all-in APY",
+                    f"{non_kraken_allin:.2f}%",
+                    delta=f"{'⚠ BELOW FLOOR' if floor_breached else ''}",
+                    delta_color="inverse" if floor_breached else "off",
+                    help="Base APY + Merkl incentive rate for non-Kraken depositors.",
+                )
+                if floor_breached:
+                    st.error(f"Below {venue.floor_label or 'floor'} ({venue.floor_apy:.1f}%)!", icon="🔴")
+
+            with m2:
+                st.metric(
+                    "Kraken Merkl (A+B)",
+                    f"{c['kraken_merkl']:.3f}%",
+                    help="Combined effective incentive rate for Kraken Earn.",
+                )
+                st.metric(
+                    "Kraken all-in APY",
+                    f"{kraken_allin:.2f}%",
+                    help="Base APY + Campaign A + Campaign B combined incentive rate for Kraken Earn.",
+                )
+
+            with m3:
+                st.metric("Campaign A rate", f"{c['rate_a']:.3f}%",
+                          delta="at cap" if c["at_cap_a"] else "below cap",
+                          delta_color="off",
+                          help="Effective Campaign A incentive rate. 'At cap' means Rmax A has been reached and budget is underspent.")
+                st.metric("Campaign B rate", f"{c['rate_b']:.3f}%",
+                          delta="at cap" if c["at_cap_b"] else "below cap",
+                          delta_color="off",
+                          help="Effective Campaign B incentive rate (Kraken only). 'At cap' means Rmax B has been reached.")
+
+            with m4:
+                st.metric(
+                    "Total spend (A+B)",
+                    f"${c['total_spend']:.1f}K/wk",
+                    delta=f"-${c['unspent']:.1f}K unspent" if c["unspent"] > 0.5 else "fully deployed",
+                    delta_color="normal" if c["unspent"] > 0.5 else "off",
+                    help="Combined weekly spend across both campaigns. Unspent means rate cap was hit before budget was exhausted.",
+                )
+                st.metric(
+                    "Annualised cost",
+                    f"${(c['total_spend'] * 52 / 1_000):.2f}M/yr",
+                    help="Total spend extrapolated to annual cost (spend × 52 weeks).",
+                )
+
+            st.divider()
+
+            # ── Row 3: Capacity metrics ────────────────────────────────────────
+            cap1, cap2, cap3, cap4 = st.columns(4)
+
+            cap1.metric(
+                "Campaign B breakeven TVL",
+                f"${breakeven_b_m:.1f}M",
+                help="Kraken TVL at which Campaign B rate starts compressing below Rmax B.",
+            )
+            cap2.metric(
+                "Headroom before B compresses",
+                f"+${headroom_b:.1f}M",
+                delta="⚠ tightening" if 5 < headroom_b <= 20 else ("⚠ at cap" if headroom_b <= 5 else ""),
+                delta_color="off" if headroom_b > 20 else ("off" if headroom_b > 5 else "inverse"),
+                help="How much more Kraken TVL can grow before Campaign B rate compresses below Rmax B.",
+            )
+            cap3.metric(
+                f"Max Kraken TVL >{min_kraken_merkl:.1f}% Merkl",
+                f"${max_kraken_for_floor:.1f}M",
+                help=f"Maximum Kraken TVL before combined Merkl rate drops below {min_kraken_merkl:.1f}%.",
+            )
+            cap4.metric(
+                "Additional Kraken capacity",
+                f"+${additional_before_3p5:.1f}M",
+                delta="⚠ moderate" if 20 < additional_before_3p5 <= 50 else ("⚠ limited" if additional_before_3p5 <= 20 else ""),
+                delta_color="off" if additional_before_3p5 > 50 else ("off" if additional_before_3p5 > 20 else "inverse"),
+                help=f"How much more Kraken TVL can be added before combined Merkl rate drops below {min_kraken_merkl:.1f}%.",
+            )
+
+            # ── Euler cap vs scenario TVL check ───────────────────────────────
+            if cap_info and cap_info["supply_cap_usd"] > 0:
+                cap_m = cap_info["supply_cap_usd"] / 1e6
+                scenario_tvl = nk_tvl + k_tvl  # slider TVL ($M)
+                if scenario_tvl > cap_m:
+                    needed = scenario_tvl - cap_m
+                    st.error(
+                        f"🚫 Scenario TVL (${scenario_tvl:.0f}M) exceeds Euler supply cap (${cap_m:,.0f}M). "
+                        f"**Increase Euler cap by ${needed:,.0f}M to ${scenario_tvl:,.0f}M** to support this scenario.",
+                        icon="🔴",
+                    )
+                elif (cap_m - scenario_tvl) < 20:
+                    st.warning(
+                        f"⚠️ Scenario TVL (${scenario_tvl:.0f}M) is within ${cap_m - scenario_tvl:,.1f}M of "
+                        f"Euler supply cap (${cap_m:,.0f}M). Consider increasing cap to **${scenario_tvl + 50:,.0f}M**.",
+                        icon="⚠️",
+                    )
+
+            # ── Row 4: Detailed breakdown ─────────────────────────────────────
+            with st.expander("Detailed breakdown", expanded=False):
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.markdown("**Campaign A**")
+                    st.markdown(
+                        f"- Weekly budget: **${budget_a:.1f}K**\n"
+                        f"- Annual budget: **${budget_a * 52 / 1_000:.2f}M**\n"
+                        f"- Total TVL (A denominator): **${c['total_tvl_m']:.1f}M**\n"
+                        f"- Raw rate (no cap): **{budget_a * 52 / (c['total_tvl_m'] * 1_000) * 100:.3f}%**\n"
+                        f"- Rmax A cap: **{rmax_a:.2f}%**\n"
+                        f"- Effective rate A: **{c['rate_a']:.3f}%** {'(capped)' if c['at_cap_a'] else '(uncapped)'}\n"
+                        f"- Actual spend A: **${c['spend_a']:.2f}K/wk** (of ${budget_a:.1f}K budget)"
+                    )
+                with d2:
+                    st.markdown("**Campaign B**")
+                    st.markdown(
+                        f"- Weekly budget: **${budget_b:.1f}K**\n"
+                        f"- Annual budget: **${budget_b * 52 / 1_000:.2f}M**\n"
+                        f"- Kraken TVL (B denominator): **${k_tvl:.1f}M**\n"
+                        f"- Raw rate (no cap): **{budget_b * 52 / (k_tvl * 1_000) * 100 if k_tvl > 0 else 0:.3f}%**\n"
+                        f"- Rmax B cap: **{rmax_b:.2f}%**\n"
+                        f"- Effective rate B: **{c['rate_b']:.3f}%** {'(capped)' if c['at_cap_b'] else '(uncapped)'}\n"
+                        f"- Actual spend B: **${c['spend_b']:.2f}K/wk** (of ${budget_b:.1f}K budget)\n"
+                        f"- Breakeven Kraken TVL: **${breakeven_b_m:.1f}M** "
+                        f"(BudgetB × 52 / Rmax B = ${budget_b:.1f}K × 52 / {rmax_b:.2f}%)"
+                    )
+
+            # ── Row 5: Scenario explorer ──────────────────────────────────────
+            with st.expander("📈 Rate curve — Kraken TVL sweep", expanded=True):
+                chart_tabs = st.tabs(["Rate vs Kraken TVL", "Spend vs Kraken TVL"])
+                with chart_tabs[0]:
+                    try:
+                        fig = make_rate_chart(
+                            venue, nk_tvl, budget_a, budget_b, rmax_a, rmax_b, base_apy, k_tvl
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Chart error: {e}")
+                with chart_tabs[1]:
+                    try:
+                        fig2 = make_spend_chart(
+                            venue, nk_tvl, budget_a, budget_b, rmax_a, rmax_b, k_tvl
+                        )
+                        st.plotly_chart(fig2, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Chart error: {e}")
+
+            # ── Row 6: What-if Kraken TVL growth table ────────────────────────
+            with st.expander("📋 What-if: Kraken TVL growth scenarios", expanded=False):
+                steps = [0, 10, 25, 50, 75, 100, 150, 200, 300, 500]
+                rows = []
+                for delta_k in steps:
+                    k_test = k_tvl + delta_k
+                    ct = compute_rates(nk_tvl, k_test, budget_a, budget_b, rmax_a, rmax_b)
+                    rows.append({
+                        "+Δ Kraken ($M)": f"+${delta_k}M",
+                        "Kraken TVL ($M)": f"${k_test:.0f}M",
+                        "Rate A (%)": f"{ct['rate_a']:.3f}%",
+                        "Rate B (%)": f"{ct['rate_b']:.3f}%",
+                        "Kraken Merkl": f"{ct['kraken_merkl']:.3f}%",
+                        "Kraken all-in": f"{ct['kraken_merkl'] + base_apy:.2f}%",
+                        "Non-Kraken Merkl": f"{ct['non_kraken_merkl']:.3f}%",
+                        "Non-Kraken all-in": f"{ct['non_kraken_merkl'] + base_apy:.2f}%",
+                        "Spend A ($K/wk)": f"${ct['spend_a']:.1f}",
+                        "Spend B ($K/wk)": f"${ct['spend_b']:.1f}",
+                        "Total Spend ($K/wk)": f"${ct['total_spend']:.1f}",
+                        "B at cap?": "✓" if ct["at_cap_b"] else "",
+                        f"Kraken >{min_kraken_merkl:.1f}%?": "✓" if ct["kraken_merkl"] >= min_kraken_merkl else "⚠",
+                    })
+                import pandas as pd
+                df = pd.DataFrame(rows)
+                # Highlight rows where Kraken drops below floor
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+            # ── Row 7: Budget re-allocation helper ─────────────────────────────
+            with st.expander("💡 Budget re-allocation calculator", expanded=False):
+                st.markdown(
+                    "Redirect budget from Campaign A to Campaign B while keeping "
+                    "total spend flat. Shows the impact of each shift."
+                )
+                total_budget_fixed = budget_a + budget_b
+                shift_cols = st.columns([2, 3])
+                with shift_cols[0]:
+                    b_new = st.slider(
+                        "Budget B (after shift) ($K/wk)",
+                        min_value=0.0, max_value=float(total_budget_fixed),
+                        step=0.5, value=float(budget_b),
+                        key=f"{k}_realloc_b",
+                        help="Increase B, decrease A proportionally. Total held constant.",
+                    )
+                a_new = total_budget_fixed - b_new
+                with shift_cols[1]:
+                    c_new = compute_rates(nk_tvl, k_tvl, a_new, b_new, rmax_a, rmax_b)
+                    delta_kraken = c_new["kraken_merkl"] - c["kraken_merkl"]
+                    delta_nk = c_new["non_kraken_merkl"] - c["non_kraken_merkl"]
+                    ra1, ra2, ra3, ra4 = st.columns(4)
+                    ra1.metric("New Budget A", f"${a_new:.1f}K/wk", delta=f"{a_new - budget_a:+.1f}K", delta_color="inverse", help="Adjusted Campaign A weekly budget after reallocation.")
+                    ra2.metric("New Budget B", f"${b_new:.1f}K/wk", delta=f"{b_new - budget_b:+.1f}K", delta_color="normal", help="Adjusted Campaign B weekly budget after reallocation.")
+                    ra3.metric("Kraken Merkl change", f"{c_new['kraken_merkl']:.3f}%", delta=f"{delta_kraken:+.3f}%", delta_color="normal", help="Change in Kraken's combined incentive rate (A+B) from reallocation.")
+                    ra4.metric("Non-Kraken Merkl change", f"{c_new['non_kraken_merkl']:.3f}%", delta=f"{delta_nk:+.3f}%", delta_color="inverse" if delta_nk < 0 else "normal", help="Change in non-Kraken incentive rate (A only) from reallocation.")
+
+            st.divider()
+
+    # ============================================================================
+    # FOOTER
+    # ============================================================================
+    st.markdown("---")
+    st.caption(
+        "All rates are % APY.  TVL inputs in $M.  Budget inputs in $K/week.  "
+        "Base APY is organic yield from borrowers before incentives.  "
+        "Kraken TVL dilutes **both** Campaign A (via total TVL denominator) "
+        "and Campaign B (directly, as its sole denominator).  "
+        "On-chain data cached 5 minutes.  Updated: " + time.strftime("%Y-%m-%d %H:%M UTC")
+    )
