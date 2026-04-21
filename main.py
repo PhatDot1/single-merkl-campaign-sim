@@ -16,6 +16,7 @@ home_page = st.Page(
     app5,
     title="Homepage",
     icon=":material/home:",
+    url_path="home",
     default=True,
 )
 
@@ -23,6 +24,7 @@ kraken_split_page = st.Page(
     kraken_split,
     title="Kraken Split",
     icon=":material/bolt:",
+    url_path="kraken-split",
 )
 
 
